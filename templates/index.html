@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ROWAD AI - ConflictScan &amp; RFI Automation</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .panel {
+      background: #2a2a2a;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .panel h2 { color: #FFD700; margin-top: 0; }
+
+    .doc-pair {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+    .doc-slot {
+      background: #333;
+      padding: 16px;
+      border-radius: 6px;
+      border-top: 3px solid #2196F3;
+    }
+    .doc-slot.slot-b { border-top-color: #9C27B0; }
+    .doc-slot .hint {
+      font-size: 12px;
+      color: #aaa;
+      margin: 4px 0 10px 0;
+    }
+    .doc-name-input {
+      width: 100%;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid #555;
+      color: #eee;
+      font-size: 18px;
+      font-weight: bold;
+      padding: 4px 2px;
+      margin: 0;
+    }
+    .doc-name-input:focus {
+      outline: none;
+      border-bottom-color: #2196F3;
+    }
+    .slot-b .doc-name-input:focus { border-bottom-color: #9C27B0; }
+    .doc-name-input::placeholder { color: #888; font-weight: normal; }
+
+    .discrepancy-item {
+      background: rgba(244, 67, 54, 0.12);
+      border-left: 4px solid #f44336;
+      padding: 12px;
+      margin-bottom: 12px;
+      border-radius: 4px;
+    }
+    .discrepancy-item.sev-major  { background: rgba(255,152,0,0.12);  border-left-color: #ff9800; }
+    .discrepancy-item.sev-minor  { background: rgba(255,235,59,0.10); border-left-color: #ffeb3b; }
+
+    .discrepancy-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+    .sev-tag-critical { background: #f44336; color: #fff; }
+    .sev-tag-major    { background: #ff9800; color: #fff; }
+    .sev-tag-minor    { background: #ffeb3b; color: #333; }
+    .type-tag         { background: #555;    color: #ddd; }
+
+    .side-by-side {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 10px 0;
+    }
+    .side {
+      background: #262626;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .side .side-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: #2196F3;
+      margin-bottom: 4px;
+    }
+    .side.side-b .side-label { color: #CE93D8; }
+    .side .ref { color: #888; font-size: 11px; margin-top: 6px; }
+
+    .rfi-card {
+      background: #333;
+      border-left: 4px solid #4CAF50;
+      border-radius: 4px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .rfi-card h4 { margin: 0 0 4px 0; color: #4CAF50; }
+    .rfi-card .rfi-meta { font-size: 12px; color: #aaa; margin-bottom: 10px; }
+    .rfi-field { margin-bottom: 10px; }
+    .rfi-field label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: #999;
+      margin-bottom: 3px;
+    }
+    .rfi-field textarea {
+      width: 100%;
+      background: #262626;
+      color: #eee;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: inherit;
+      font-size: 13px;
+      resize: vertical;
+    }
+    .rfi-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .rfi-actions button { padding: 6px 14px; font-size: 13px; }
+    .rfi-status { font-size: 12px; color: #4CAF50; }
+
+    .stat-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin: 12px 0;
+    }
+    .stat {
+      background: #333;
+      padding: 10px 12px;
+      border-radius: 6px;
+    }
+    .stat .stat-value { font-size: 20px; font-weight: bold; }
+    .stat .stat-label { font-size: 11px; color: #aaa; text-transform: uppercase; }
+
+    .warning-box {
+      background: rgba(255, 152, 0, 0.15);
+      border-left: 4px solid #ff9800;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 4px;
+    }
+    .confidence-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .confidence-high   { background: #4CAF50; color: #fff; }
+    .confidence-medium { background: #ff9800; color: #fff; }
+    .confidence-low    { background: #f44336; color: #fff; }
+
+    .download-link { color: #FFD700; }
+    .muted { color: #999; font-size: 13px; }
+  </style>
+</head>
+
+<body>
+
+<div id="loading-overlay" class="loading-overlay" style="display:none;">
+  <div id="loading-text">Processing...</div>
+</div>
+
+<div class="container">
+
+  <header class="header">
+    <div class="title-block">
+      <h1>ROWAD AI - ConflictScan</h1>
+      <p>
+        Compare any two documents from different stages of the same project.<br>
+        Discrepancies are detected, ranked, and turned into draft RFIs for the client.
+      </p>
+    </div>
+  </header>
+
+  <!-- ===================== INPUT ===================== -->
+  <section class="panel">
+    <label><strong>Project Name</strong></label>
+    <input id="project_name" type="text" placeholder="e.g. ALSTOM Borg El Arab">
+
+    <div class="doc-pair" style="margin-top:16px;">
+
+      <div class="doc-slot">
+        <input id="document_a_label" class="doc-name-input" type="text" placeholder="Document A name (e.g. Tender BOQ)">
+        <p class="hint">This name is used to refer to the document in every finding and RFI.</p>
+
+        <label style="margin-top:10px;"><strong>Upload file</strong> (PDF / Word / Excel / TXT)</label>
+        <input id="document_a_file" type="file" accept=".pdf,.doc,.docx,.txt,.xlsx,.xls">
+
+        <label style="margin-top:10px;"><strong>...or paste the text</strong></label>
+        <textarea id="document_a_text" rows="5" placeholder="Paste the document text here"></textarea>
+      </div>
+
+      <div class="doc-slot slot-b">
+        <input id="document_b_label" class="doc-name-input" type="text" placeholder="Document B name (e.g. IFC Specifications)">
+        <p class="hint">This name is used to refer to the document in every finding and RFI.</p>
+
+        <label style="margin-top:10px;"><strong>Upload file</strong> (PDF / Word / Excel / TXT)</label>
+        <input id="document_b_file" type="file" accept=".pdf,.doc,.docx,.txt,.xlsx,.xls">
+
+        <label style="margin-top:10px;"><strong>...or paste the text</strong></label>
+        <textarea id="document_b_text" rows="5" placeholder="Paste the document text here"></textarea>
+      </div>
+
+    </div>
+
+    <label style="margin-top:16px;"><strong>Review focus</strong> (optional)</label>
+    <p class="hint">Narrow what the scan pays attention to. Leave blank for a full comparison.</p>
+    <textarea id="review_focus" rows="2"
+      placeholder="e.g. concentrate on structural concrete grades and reinforcement cover"></textarea>
+
+    <button id="submit-btn" style="margin-top:14px;">Run Conflict Scan</button>
+
+    <div style="margin-top:14px;" class="muted">
+      RFI form: <span id="template-status">checking...</span>
+      &nbsp;|&nbsp;
+      <label for="rfi_template_file" style="display:inline; cursor:pointer; color:#FFD700;">upload a form</label>
+      <input id="rfi_template_file" type="file" accept=".docx" style="display:none;">
+    </div>
+  </section>
+
+  <!-- ===================== RESULTS ===================== -->
+  <section id="results-panel" class="panel" style="display:none;">
+    <h2>Scan Result</h2>
+
+    <div><strong>Confidence:</strong> <span id="confidence-badge"></span></div>
+    <p id="scan-summary" style="margin-top:10px;"></p>
+
+    <div class="stat-row" id="doc-stats"></div>
+
+    <div id="warnings-list"></div>
+
+    <p id="register-line" class="muted"></p>
+  </section>
+
+  <section id="discrepancies-panel" class="panel" style="display:none;">
+    <h2>Discrepancies</h2>
+    <div id="discrepancies-list"></div>
+  </section>
+
+  <section id="rfi-panel" class="panel" style="display:none;">
+    <h2>Draft RFIs</h2>
+    <p class="muted">
+      Edit any field below, then regenerate the Word document to download the revised version.
+    </p>
+    <div id="rfi-list"></div>
+  </section>
+
+  <p id="error" class="error"></p>
+
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const overlay      = document.getElementById("loading-overlay");
+  const loadingText  = document.getElementById("loading-text");
+  const errorEl      = document.getElementById("error");
+  let   currentEventId = null;
+
+  const steps = [
+    "Reading both documents...",
+    "Profiling Document A...",
+    "Profiling Document B...",
+    "Comparing the two documents...",
+    "Ranking discrepancies...",
+    "Drafting RFIs..."
+  ];
+
+  let stepTimer = null;
+
+  function showLoading() {
+    overlay.style.display = "flex";
+    let i = 0;
+    loadingText.innerText = steps[0];
+    stepTimer = setInterval(() => {
+      i = (i + 1) % steps.length;
+      loadingText.innerText = steps[i];
+    }, 4000);
+  }
+
+  function hideLoading() {
+    overlay.style.display = "none";
+    if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+  }
+
+  function showError(message) {
+    errorEl.style.display = "block";
+    errorEl.innerText = message;
+  }
+
+  function clearError() {
+    errorEl.style.display = "none";
+    errorEl.innerText = "";
+  }
+
+  const esc = (value) => {
+    const div = document.createElement("div");
+    div.innerText = value == null ? "" : String(value);
+    return div.innerHTML;
+  };
+
+  // ---------------- RFI template status ----------------
+
+  async function loadTemplateStatus() {
+    try {
+      const res  = await fetch("/api/rfi-template");
+      const data = await res.json();
+      document.getElementById("template-status").innerText =
+        data.loaded ? `${data.filename} (${data.tokens.length} placeholders)`
+                    : "none loaded - RFIs will be drafted on screen only";
+    } catch (err) {
+      document.getElementById("template-status").innerText = "unavailable";
+    }
+  }
+
+  document.getElementById("rfi_template_file").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("template", file);
+    const res  = await fetch("/api/rfi-template", { method: "POST", body: fd });
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+    clearError();
+    loadTemplateStatus();
+  });
+
+  loadTemplateStatus();
+
+  // ---------------- Run the scan ----------------
+
+  document.getElementById("submit-btn").addEventListener("click", async (e) => {
+    e.preventDefault();
+    clearError();
+
+    const fileA = document.getElementById("document_a_file").files[0];
+    const fileB = document.getElementById("document_b_file").files[0];
+    const textA = document.getElementById("document_a_text").value.trim();
+    const textB = document.getElementById("document_b_text").value.trim();
+
+    if ((!fileA && !textA) || (!fileB && !textB)) {
+      showError("Both documents are required - upload a file or paste text into each slot.");
+      return;
+    }
+
+    const fd = new FormData();
+    fd.append("project_name", document.getElementById("project_name").value);
+    fd.append("review_focus", document.getElementById("review_focus").value);
+    fd.append("document_a_label", document.getElementById("document_a_label").value);
+    fd.append("document_b_label", document.getElementById("document_b_label").value);
+    fd.append("document_a_text", textA);
+    fd.append("document_b_text", textB);
+    if (fileA) fd.append("document_a_file", fileA);
+    if (fileB) fd.append("document_b_file", fileB);
+
+    showLoading();
+
+    let data;
+    try {
+      const res = await fetch("/scan", { method: "POST", body: fd });
+      data = await res.json();
+    } catch (fetchErr) {
+      hideLoading();
+      showError("Network error: " + fetchErr.message);
+      return;
+    }
+    hideLoading();
+
+    if (data.error) { showError("Server error: " + data.error); return; }
+
+    try {
+      render(data);
+    } catch (renderErr) {
+      showError("Display error: " + renderErr.message);
+      console.error(renderErr);
+    }
+  });
+
+  // ---------------- Rendering ----------------
+
+  function render(data) {
+    currentEventId = data.event_id;
+
+    // Summary
+    const confidence = (data.confidence_level || "medium").toLowerCase();
+    const badge = document.getElementById("confidence-badge");
+    badge.className = "confidence-badge confidence-" + confidence;
+    badge.innerText = confidence.toUpperCase();
+
+    document.getElementById("scan-summary").innerText = data.scan_summary || "";
+
+    const stats = document.getElementById("doc-stats");
+    stats.innerHTML = "";
+    [data.document_a, data.document_b].forEach(doc => {
+      if (!doc) return;
+      const el = document.createElement("div");
+      el.className = "stat";
+      el.innerHTML = `
+        <div class="stat-value">${esc(doc.label)}</div>
+        <div class="stat-label">
+          ${esc(doc.source)} &middot; ${doc.requirement_count} requirements &middot;
+          ${doc.quantity_count} quantities &middot; ${doc.chunk_count} chunks
+        </div>`;
+      stats.appendChild(el);
+    });
+
+    const warningsList = document.getElementById("warnings-list");
+    warningsList.innerHTML = "";
+    (data.warnings || []).forEach(w => {
+      const div = document.createElement("div");
+      div.className = "warning-box";
+      div.innerText = w;
+      warningsList.appendChild(div);
+    });
+
+    const registerLine = document.getElementById("register-line");
+    registerLine.innerHTML = data.register_file
+      ? `Register: <a class="download-link" href="/exports/${encodeURIComponent(data.register_file)}">${esc(data.register_file)}</a>`
+      : "";
+
+    document.getElementById("results-panel").style.display = "block";
+
+    // Discrepancies
+    const list = document.getElementById("discrepancies-list");
+    list.innerHTML = "";
+    const discrepancies = data.discrepancies || [];
+
+    if (!discrepancies.length) {
+      list.innerHTML = "<p>No discrepancies found between the two documents.</p>";
+    } else {
+      const labelA = (data.document_a && data.document_a.label) || "Document A";
+      const labelB = (data.document_b && data.document_b.label) || "Document B";
+
+      discrepancies.forEach(d => {
+        const severity = (d.severity || "minor").toLowerCase();
+        const div = document.createElement("div");
+        div.className = "discrepancy-item sev-" + severity;
+        div.innerHTML = `
+          <div class="discrepancy-header">
+            <span>${esc(d.id)} &nbsp; ${esc(d.topic)}</span>
+            <span>
+              <span class="tag type-tag">${esc((d.type || "").replace(/_/g, " "))}</span>
+              <span class="tag sev-tag-${severity}">${esc(severity)}</span>
+            </span>
+          </div>
+          <p>${esc(d.description)}</p>
+          <div class="side-by-side">
+            <div class="side">
+              <div class="side-label">${esc(labelA)}</div>
+              <div>${esc(d.document_a_says) || "&ndash;"}</div>
+              ${d.document_a_reference ? `<div class="ref">Ref: ${esc(d.document_a_reference)}</div>` : ""}
+            </div>
+            <div class="side side-b">
+              <div class="side-label">${esc(labelB)}</div>
+              <div>${esc(d.document_b_says) || "&ndash;"}</div>
+              ${d.document_b_reference ? `<div class="ref">Ref: ${esc(d.document_b_reference)}</div>` : ""}
+            </div>
+          </div>
+          ${d.impact ? `<p><strong>Impact:</strong> ${esc(d.impact)}</p>` : ""}
+          ${d.suggested_question ? `<p><strong>Clarification sought:</strong> ${esc(d.suggested_question)}</p>` : ""}
+        `;
+        list.appendChild(div);
+      });
+    }
+    document.getElementById("discrepancies-panel").style.display = "block";
+
+    // RFIs
+    renderRfis(data.rfi_items || []);
+  }
+
+  const RFI_FIELDS = [
+    ["subject",             "Subject",              1],
+    ["background",          "Background",           3],
+    ["discrepancy_summary", "Discrepancy",          3],
+    ["question",            "Information requested", 3],
+    ["proposed_solution",   "Proposed way forward", 2],
+    ["cost_impact",         "Cost impact",          2],
+    ["schedule_impact",     "Programme impact",     2],
+  ];
+
+  function renderRfis(rfiItems) {
+    const panel = document.getElementById("rfi-panel");
+    const list  = document.getElementById("rfi-list");
+    list.innerHTML = "";
+
+    if (!rfiItems.length) {
+      panel.style.display = "none";
+      return;
+    }
+
+    rfiItems.forEach(rfi => {
+      const card = document.createElement("div");
+      card.className = "rfi-card";
+
+      const fieldsHtml = RFI_FIELDS.map(([key, label, rows]) => `
+        <div class="rfi-field">
+          <label>${label}</label>
+          <textarea rows="${rows}" data-field="${key}">${esc(rfi[key] || "")}</textarea>
+        </div>`).join("");
+
+      card.innerHTML = `
+        <h4>${esc(rfi.rfi_no)} &mdash; ${esc(rfi.subject)}</h4>
+        <div class="rfi-meta">
+          From ${esc(rfi.discrepancy_id)} &middot; ${esc(rfi.discipline)} &middot;
+          priority ${esc(rfi.priority)} &middot; response by ${esc(rfi.response_required_by)}
+        </div>
+        ${fieldsHtml}
+        <div class="rfi-actions">
+          <button type="button" class="regen-btn">Regenerate Word document</button>
+          ${rfi.docx_file
+            ? `<a class="download-link" href="/exports/${encodeURIComponent(rfi.docx_file)}">download draft</a>`
+            : `<span class="muted">no form loaded</span>`}
+          <span class="rfi-status"></span>
+        </div>
+      `;
+
+      card.querySelector(".regen-btn").addEventListener("click", async () => {
+        const status = card.querySelector(".rfi-status");
+        const edited = { ...rfi };
+        card.querySelectorAll("textarea[data-field]").forEach(t => {
+          edited[t.dataset.field] = t.value;
+        });
+
+        status.innerText = "generating...";
+        try {
+          const res = await fetch("/api/rfi/export", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event_id: currentEventId, rfi: edited }),
+          });
+          const result = await res.json();
+          if (result.error) {
+            status.innerText = "";
+            showError(result.error);
+            return;
+          }
+          status.innerHTML =
+            `saved &mdash; <a class="download-link" href="/exports/${encodeURIComponent(result.file)}">download</a>`;
+        } catch (err) {
+          status.innerText = "";
+          showError("Could not generate the document: " + err.message);
+        }
+      });
+
+      list.appendChild(card);
+    });
+
+    panel.style.display = "block";
+  }
+
+});
+</script>
+
+</body>
+</html>

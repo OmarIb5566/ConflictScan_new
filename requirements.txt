@@ -1,0 +1,22 @@
+# ConflictScan / RFI Automation - Requirements
+# Windows compatible
+
+# Core Framework
+langgraph>=0.0.50
+langchain-core>=0.1.0
+
+# Web Framework
+flask>=2.3.0
+flask-cors>=4.0.0
+werkzeug>=2.3.0
+
+# Data processing (Excel reading, register export)
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Document processing
+pdfplumber>=0.9.0      # PDF text extraction
+python-docx>=0.8.11    # DOCX reading, and filling the RFI form
+
+# Utilities
+requests>=2.31.0       # Ollama client

@@ -1,0 +1,8 @@
+.myenv/
+Material lists/
+__pycache__/
+*.pyc
+exports/
+uploads/
+trial/
+graphify-out/
