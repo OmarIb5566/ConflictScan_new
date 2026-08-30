@@ -19,7 +19,7 @@ LLM backend: Ollama via nodes/llm_client.py.
 """
 
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded LLM client (avoids circular imports at module load time)
@@ -43,7 +43,7 @@ CHUNK_SIZE = 8_000    # characters per chunk
 CHUNK_OVERLAP = 500   # character overlap between consecutive chunks
 
 
-def chunk_document(text: str) -> List[Dict[str, Any]]:
+def chunk_document(text: str, offset: int = 0) -> List[Dict[str, Any]]:
     """
     Split *text* into overlapping chunks of ~CHUNK_SIZE characters.
 
@@ -56,6 +56,11 @@ def chunk_document(text: str) -> List[Dict[str, Any]]:
       previous chunk (context carry-over).
     * Every chunk is tagged with its index and the approximate character range
       it covers in the original document.
+
+    *offset* is added to every char_start/char_end so that chunking a
+    mid-document slice (e.g. one section pulled out by review-focus
+    sectioning) still reports the slice's TRUE position in the original
+    document - needed for citation accuracy downstream.
 
     Returns a list of dicts with keys:
         chunk_index, total_chunks, char_start, char_end, text
@@ -82,8 +87,8 @@ def chunk_document(text: str) -> List[Dict[str, Any]]:
             {
                 "chunk_index": len(chunks),
                 "total_chunks": 0,   # patched below
-                "char_start": chunk_start,
-                "char_end": char_end,
+                "char_start": offset + chunk_start,
+                "char_end": offset + char_end,
                 "text": chunk_text,
             }
         )
@@ -128,6 +133,183 @@ def chunk_document(text: str) -> List[Dict[str, Any]]:
         c["total_chunks"] = total
 
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# Review-focus section jump - when the engineer names a topic, locate it via
+# the document's OWN headings/section titles and only chunk those sections,
+# instead of reading the whole document to decide what's relevant. This
+# matters most on large specification documents (hundreds of chunks) where
+# running every chunk through the full extraction prompt would take minutes
+# and mostly profile material the engineer explicitly said they don't care
+# about.
+# ---------------------------------------------------------------------------
+
+MIN_HEADINGS_FOR_SECTIONING = 3   # fewer than this = "no clear structure"
+HEADING_REPEAT_LIMIT = 3          # a title repeated more than this = running header/footer noise
+
+# Sections that apply across every trade/topic and are always worth keeping
+# alongside whatever the review focus matches - a narrow, documented exception
+# to the document-agnostic extraction principle, not a return to scanning
+# body text: only heading TITLES are checked against this list.
+_ALWAYS_RELEVANT_TITLE_PATTERNS = [
+    r"general\s+requirements", r"general\s+conditions", r"general\s+notes",
+    r"preliminar(?:y|ies)", r"scope\s+of\s+work", r"summary\s+of\s+work",
+]
+
+_HEADING_PATTERNS = [
+    # level 0: SECTION/DIVISION/PART lines and numbered section codes
+    (0, re.compile(
+        r"^\s*(?:SECTION|DIVISION|PART)\s+[\dIVXLC]+\b.*$"
+        r"|^\s*\d{2}\s?\d{2}\s?\d{2}\b.*$",
+        re.MULTILINE | re.IGNORECASE,
+    )),
+    # level 1: numbered clauses, e.g. "1.2 Masonry Units", "4.2.1 Grout"
+    (1, re.compile(
+        r"^\s*\d{1,2}(?:\.\d{1,2}){1,3}\s+[A-Za-z][A-Za-z0-9 /,&'()\-]{2,80}$",
+        re.MULTILINE,
+    )),
+    # level 2: standalone ALL-CAPS or Title Case short lines, no end punctuation
+    (2, re.compile(
+        r"^\s*(?=.{4,80}$)[A-Z][A-Za-z0-9 /,&'()\-]*[A-Za-z0-9)]$",
+        re.MULTILINE,
+    )),
+]
+
+
+def _detect_headings(text: str) -> List[Dict[str, Any]]:
+    """
+    Regex/LLM-free outline scan of *text*. Returns headings in document
+    order: [{"title": str, "char_start": int, "level": int}, ...].
+
+    Stays document-format-agnostic - not tied to any one numbering
+    convention. Two noise filters keep this usable on real PDF-extracted
+    text: pure-numeric/very-short lines are rejected outright, and any exact
+    title that recurs more than HEADING_REPEAT_LIMIT times (a running header
+    or footer repeated on every page) is kept only at its first occurrence.
+    """
+    if not text:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    seen_spans = set()
+
+    for level, pattern in _HEADING_PATTERNS:
+        for m in pattern.finditer(text):
+            line = m.group(0).strip()
+            if m.start() in seen_spans:
+                continue
+            if len(line) < 4 or line.isdigit():
+                continue
+            seen_spans.add(m.start())
+            candidates.append({"title": line, "char_start": m.start(), "level": level})
+
+    candidates.sort(key=lambda h: h["char_start"])
+
+    title_counts: Dict[str, int] = {}
+    for h in candidates:
+        norm = re.sub(r"\s+", " ", h["title"]).strip().lower()
+        title_counts[norm] = title_counts.get(norm, 0) + 1
+
+    headings: List[Dict[str, Any]] = []
+    seen_repeats: Dict[str, int] = {}
+    for h in candidates:
+        norm = re.sub(r"\s+", " ", h["title"]).strip().lower()
+        if title_counts[norm] > HEADING_REPEAT_LIMIT:
+            seen_repeats[norm] = seen_repeats.get(norm, 0) + 1
+            if seen_repeats[norm] > 1:
+                continue   # drop every occurrence after the first - running header/footer noise
+        headings.append(h)
+
+    return headings
+
+
+def _select_relevant_headings(
+    headings: List[Dict[str, Any]], review_focus: str
+) -> Optional[List[int]]:
+    """
+    ONE LLM call: sends only the numbered heading titles (never body text)
+    plus *review_focus*, asks which are relevant. Returns indices into
+    *headings*. Returns None (distinct from []) on call/parse failure, so
+    the caller can tell "nothing is relevant" apart from "the call broke."
+
+    Always additionally selects headings that look like general/preliminary
+    sections (see _ALWAYS_RELEVANT_TITLE_PATTERNS), regardless of what the
+    LLM returns, since cross-cutting requirements often live there.
+    """
+    numbered = "\n".join(f"{i}: {h['title']}" for i, h in enumerate(headings))
+    try:
+        result = _get_llm().run(
+            system=(
+                "You are a construction document analyst. You are given the "
+                "outline (section/clause headings only, no body text) of a "
+                "construction document, and a topic an engineer wants the "
+                "scan focused on. Identify which headings are relevant to "
+                "that topic - i.e. their section is likely to discuss it."
+            ),
+            user=(
+                f"Topic: {review_focus}\n\n"
+                f"Headings:\n{numbered}\n\n"
+                'Return JSON: {"relevant_indices": [0, 4, 7, ...]}\n'
+                "Only the integer indices shown before each heading. "
+                "Empty list if none are relevant. No explanations."
+            ),
+            temperature=0.1,
+        )
+    except Exception as exc:
+        print(f"[document_analysis] Heading relevance call failed: {exc}")
+        return None
+
+    raw = result.get("relevant_indices")
+    if raw is None:
+        print("[document_analysis] Heading relevance call returned no usable result")
+        return None
+
+    llm_idx = {int(i) for i in raw if isinstance(i, (int, float, str)) and str(i).strip().lstrip("-").isdigit()}
+    llm_idx = {i for i in llm_idx if 0 <= i < len(headings)}
+
+    always_idx = {
+        i for i, h in enumerate(headings)
+        if any(re.search(p, h["title"], re.IGNORECASE) for p in _ALWAYS_RELEVANT_TITLE_PATTERNS)
+    }
+
+    return sorted(llm_idx | always_idx)
+
+
+def _build_sections(
+    text: str, headings: List[Dict[str, Any]], selected_idx: List[int]
+) -> List[Dict[str, Any]]:
+    """
+    For each selected heading, slice its span - from its char_start to the
+    next heading with level <= its own level, or end of document - then
+    sort and merge overlapping/adjacent spans (e.g. a parent SECTION and one
+    of its own nested clauses both selected) into single, non-duplicated
+    sections.
+
+    Returns [{"char_start": int, "char_end": int, "text": str}, ...].
+    """
+    spans: List[List[int]] = []
+    for idx in selected_idx:
+        h = headings[idx]
+        end = len(text)
+        for other in headings[idx + 1:]:
+            if other["level"] <= h["level"]:
+                end = other["char_start"]
+                break
+        spans.append([h["char_start"], end])
+
+    spans.sort()
+    merged: List[List[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    return [
+        {"char_start": start, "char_end": end, "text": text[start:end]}
+        for start, end in merged
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +549,24 @@ def _fallback_profile(text: str) -> Dict[str, Any]:
 # Profile one document
 # ---------------------------------------------------------------------------
 
-def build_document_profile(text: str, label: str, slot: str, source_name: str) -> Dict[str, Any]:
+def build_document_profile(
+    text: str, label: str, slot: str, source_name: str,
+    review_focus: str = "",
+) -> Dict[str, Any]:
     """
     Chunk *text*, run every chunk through the LLM, and merge the results into
     a single profile dict matching state.DocumentProfile.
+
+    When *review_focus* is given, only the section(s) of the document whose
+    heading is judged relevant to that topic are chunked and scanned - see
+    _detect_headings / _select_relevant_headings / _build_sections. This
+    never touches the rest of the document's body text at all; it navigates
+    by the document's own structure rather than scanning everything.
+
+    Invariant: whenever focus_status != "sectioned", the full document is
+    chunked and scanned (chunk_count == total_chunk_count) - a bad/absent
+    heading structure or a failed relevance call can never cause content to
+    be silently dropped.
     """
     text = (text or "").strip()
     if not text:
@@ -380,6 +576,8 @@ def build_document_profile(text: str, label: str, slot: str, source_name: str) -
             "source_name": source_name,
             "char_count": 0,
             "chunk_count": 0,
+            "total_chunk_count": 0,
+            "focus_status": "no_focus",
             "requirements": [],
             "quantities": [],
             "standards": [],
@@ -387,17 +585,51 @@ def build_document_profile(text: str, label: str, slot: str, source_name: str) -
             "internal_notes": "No text supplied for this document.",
         }
 
-    chunks = chunk_document(text)
+    all_chunks = chunk_document(text)
+    review_focus = (review_focus or "").strip()
+
+    if not review_focus:
+        chunks, focus_status = all_chunks, "no_focus"
+    else:
+        headings = _detect_headings(text)
+        if len(headings) < MIN_HEADINGS_FOR_SECTIONING:
+            print(
+                f"[document_analysis] '{label}': only {len(headings)} heading(s) detected - "
+                f"no clear section structure, scanning the full document instead"
+            )
+            chunks, focus_status = all_chunks, "no_headings_found"
+        else:
+            selected = _select_relevant_headings(headings, review_focus)
+            if selected is None:
+                print(f"[document_analysis] '{label}': section relevance check failed - scanning the full document instead")
+                chunks, focus_status = all_chunks, "selection_failed"
+            elif not selected:
+                print(f"[document_analysis] '{label}': review focus matched no sections - scanning the full document instead")
+                chunks, focus_status = all_chunks, "no_relevant_headings"
+            else:
+                sections = _build_sections(text, headings, selected)
+                chunks = []
+                for sec in sections:
+                    chunks.extend(chunk_document(sec["text"], offset=sec["char_start"]))
+                for i, c in enumerate(chunks):
+                    c["chunk_index"] = i
+                for c in chunks:
+                    c["total_chunks"] = len(chunks)
+                focus_status = "sectioned"
+                print(
+                    f"[document_analysis] '{label}': review focus matched {len(selected)}/{len(headings)} "
+                    f"heading(s) -> {len(sections)} section(s), {len(chunks)}/{len(all_chunks)} chunk(s) selected"
+                )
+
     print(
-        f"[document_analysis] '{label}': {len(text):,} chars -> {len(chunks)} chunk(s) "
-        f"(size={CHUNK_SIZE:,}, overlap={CHUNK_OVERLAP})"
+        f"[document_analysis] '{label}': {len(text):,} chars -> {len(all_chunks)} chunk(s) total "
+        f"(size={CHUNK_SIZE:,}, overlap={CHUNK_OVERLAP}), scanning {len(chunks)}"
     )
 
     chunk_results: List[Dict[str, Any]] = []
-    for chunk in chunks:
-        idx = chunk["chunk_index"]
+    for scan_pos, chunk in enumerate(chunks, start=1):
         print(
-            f"[document_analysis]   -> '{label}' chunk {idx + 1}/{len(chunks)} "
+            f"[document_analysis]   -> '{label}' scanning {scan_pos}/{len(chunks)} "
             f"(chars {chunk['char_start']:,}-{chunk['char_end']:,})"
         )
         result = _extract_chunk(chunk, label)
@@ -419,6 +651,8 @@ def build_document_profile(text: str, label: str, slot: str, source_name: str) -
         "source_name": source_name,
         "char_count": len(text),
         "chunk_count": len(chunks),
+        "total_chunk_count": len(all_chunks),
+        "focus_status": focus_status,
         **merged,
     }
 
@@ -447,18 +681,21 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
 
     label_a = state.get("document_a_label") or "Document A"
     label_b = state.get("document_b_label") or "Document B"
+    review_focus = (state.get("review_focus") or "").strip()
 
     profile_a = build_document_profile(
         state.get("document_a_text") or "",
         label_a,
         "a",
         state.get("document_a_source") or "pasted text",
+        review_focus,
     )
     profile_b = build_document_profile(
         state.get("document_b_text") or "",
         label_b,
         "b",
         state.get("document_b_source") or "pasted text",
+        review_focus,
     )
 
     warnings: List[str] = []
@@ -471,6 +708,29 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
             warnings.append(
                 f"No requirements or quantities could be extracted from '{prof['label']}'. "
                 f"The file may be a scanned image without a text layer."
+            )
+
+        status = prof.get("focus_status")
+        if status == "sectioned":
+            warnings.append(
+                f"Review focus '{review_focus}' narrowed '{prof['label']}' to "
+                f"{prof['chunk_count']}/{prof['total_chunk_count']} chunk(s) before analysis. "
+                f"Content outside these sections was not scanned."
+            )
+        elif status == "no_headings_found":
+            warnings.append(
+                f"Review focus '{review_focus}' requested for '{prof['label']}', but no clear "
+                f"section structure was detected - the full document was scanned instead."
+            )
+        elif status == "no_relevant_headings":
+            warnings.append(
+                f"Review focus '{review_focus}' matched no sections in '{prof['label']}' - "
+                f"the full document was scanned instead."
+            )
+        elif status == "selection_failed":
+            warnings.append(
+                f"Could not evaluate section relevance for '{prof['label']}' (LLM error) - "
+                f"the full document was scanned instead."
             )
 
     print(

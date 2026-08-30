@@ -60,6 +60,13 @@ for folder in (UPLOAD_FOLDER, EXPORT_FOLDER, RFI_TEMPLATE_FOLDER):
 active_sessions = {}
 session_lock = Lock()
 
+# Project-level fields the RFI form needs beyond the two documents; one value
+# per scan, reused on every RFI it produces.
+RFI_FORM_META_FIELDS = [
+    "consultant", "employer", "project_code", "to",
+    "location", "boq_no", "dwg_no", "level", "specs_no",
+]
+
 
 # ---------------------------------------------------------------------------
 # Excel sheet semantic labelling helpers
@@ -381,34 +388,6 @@ def rfi_template_status():
     })
 
 
-@app.route("/api/rfi-template", methods=["POST"])
-def upload_rfi_template():
-    """
-    Upload the project's own .docx RFI form.
-
-    It is saved into templates_rfi/ and used for every subsequent scan. The
-    form's own layout is preserved - only {{token}} placeholders are replaced.
-    """
-    uploaded = request.files.get("template")
-    if not uploaded or not uploaded.filename:
-        return jsonify({"error": "No template file supplied."}), 400
-
-    filename = secure_filename(uploaded.filename)
-    if not filename.lower().endswith(".docx"):
-        return jsonify({"error": "The RFI form must be a .docx file."}), 400
-
-    path = os.path.join(RFI_TEMPLATE_FOLDER, filename)
-    uploaded.save(path)
-
-    try:
-        tokens = list_template_tokens(path)
-    except Exception as exc:
-        return jsonify({"error": f"Uploaded file could not be read as a Word document: {exc}"}), 400
-
-    print(f"[api] RFI form uploaded: {filename} ({len(tokens)} token(s))")
-    return jsonify({"status": "success", "filename": filename, "tokens": tokens})
-
-
 @app.route("/scan", methods=["POST"])
 def scan():
     """
@@ -430,6 +409,10 @@ def scan():
         project_name = (request.form.get("project_name") or "").strip()
         review_focus = (request.form.get("review_focus") or "").strip()
         user_id = (request.form.get("user_id") or "anonymous").strip()
+        rfi_form_meta = {
+            field: (request.form.get(field) or "").strip()
+            for field in RFI_FORM_META_FIELDS
+        }
 
         text_a, label_a, source_a = _resolve_document("a")
         text_b, label_b, source_b = _resolve_document("b")
@@ -462,6 +445,7 @@ def scan():
             document_b_source=source_b,
             project_name=project_name or "Unnamed Project",
             review_focus=review_focus,
+            rfi_form_meta=rfi_form_meta,
             export_format="excel",
         )
 
@@ -480,6 +464,7 @@ def scan():
                 "project_name": project_name,
                 "document_a_label": result_state.get("document_a_label"),
                 "document_b_label": result_state.get("document_b_label"),
+                "rfi_form_meta": rfi_form_meta,
                 "discrepancies": discrepancies,
                 "rfi_items": rfi_items,
                 "timestamp": datetime.now().isoformat(),
@@ -562,6 +547,7 @@ def export_edited_rfi():
     state_like = {
         "project_name": session.get("project_name") or payload.get("project_name") or "",
         "user_id": session.get("user_id") or "",
+        "rfi_form_meta": session.get("rfi_form_meta") or {},
     }
     label_a = session.get("document_a_label") or payload.get("document_a_label") or "Document A"
     label_b = session.get("document_b_label") or payload.get("document_b_label") or "Document B"

@@ -7,12 +7,21 @@
   <link rel="stylesheet" href="/static/style.css">
   <style>
     .panel {
-      background: #2a2a2a;
-      padding: 20px;
-      border-radius: 8px;
+      background: #ffffff;
+      padding: 24px 26px;
+      border-radius: 16px;
       margin-bottom: 20px;
+      box-shadow: 0 4px 14px rgba(20, 23, 31, 0.06), 0 1px 3px rgba(20, 23, 31, 0.05);
+      border: 1px solid #e2e6ec;
     }
-    .panel h2 { color: #FFD700; margin-top: 0; }
+    .panel h2 {
+      font-family: 'Poppins', 'Inter', sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.2px;
+      color: #14171f;
+      margin-top: 0;
+    }
 
     .doc-pair {
       display: grid;
@@ -20,65 +29,136 @@
       gap: 20px;
     }
     .doc-slot {
-      background: #333;
+      background: #f5f7fa;
       padding: 16px;
-      border-radius: 6px;
-      border-top: 3px solid #2196F3;
+      border-radius: 12px;
+      border-top: 3px solid #2f6fed;
     }
-    .doc-slot.slot-b { border-top-color: #9C27B0; }
+    .doc-slot.slot-b { border-top-color: #7c3aed; }
     .doc-slot .hint {
       font-size: 12px;
-      color: #aaa;
+      color: #8a90a0;
       margin: 4px 0 10px 0;
     }
     .doc-name-input {
       width: 100%;
       background: transparent;
       border: none;
-      border-bottom: 1px solid #555;
-      color: #eee;
+      border-bottom: 1px solid #d7dbe3;
+      color: #14171f;
       font-size: 18px;
-      font-weight: bold;
+      font-weight: 700;
       padding: 4px 2px;
       margin: 0;
     }
     .doc-name-input:focus {
       outline: none;
-      border-bottom-color: #2196F3;
+      border-bottom-color: #2f6fed;
     }
-    .slot-b .doc-name-input:focus { border-bottom-color: #9C27B0; }
-    .doc-name-input::placeholder { color: #888; font-weight: normal; }
+    .slot-b .doc-name-input:focus { border-bottom-color: #7c3aed; }
+    .doc-name-input::placeholder { color: #a3a9b7; font-weight: normal; }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px 24px;
+      margin-top: 12px;
+    }
+    @media (max-width: 560px) {
+      .meta-grid { grid-template-columns: 1fr; }
+    }
+    .meta-grid label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: #8a90a0;
+      margin-bottom: 3px;
+    }
+    .meta-grid input { width: 100%; }
+
+    .link-btn {
+      background: none;
+      border: none;
+      color: #2f6fed;
+      cursor: pointer;
+      padding: 0;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .link-btn:hover { text-decoration: underline; }
+
+    .loading-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 9999;
+      background: #ffffff;
+      border-bottom: 1px solid #e2e6ec;
+      padding: 8px 16px;
+      box-shadow: 0 2px 10px rgba(20, 23, 31, 0.08);
+    }
+    .loading-bar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: #14171f;
+      margin-bottom: 6px;
+    }
+    .loading-bar .link-btn { color: #d64545; }
+    .loading-track {
+      height: 4px;
+      background: #e2e6ec;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .loading-fill {
+      height: 100%;
+      width: 40%;
+      background: #2f6fed;
+      border-radius: 2px;
+      animation: loading-slide 1.2s ease-in-out infinite;
+    }
+    @keyframes loading-slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
 
     .discrepancy-item {
-      background: rgba(244, 67, 54, 0.12);
+      background: #fdf1f0;
       border-left: 4px solid #f44336;
-      padding: 12px;
+      padding: 14px 16px;
       margin-bottom: 12px;
-      border-radius: 4px;
+      border-radius: 10px;
     }
-    .discrepancy-item.sev-major  { background: rgba(255,152,0,0.12);  border-left-color: #ff9800; }
-    .discrepancy-item.sev-minor  { background: rgba(255,235,59,0.10); border-left-color: #ffeb3b; }
+    .discrepancy-item.sev-major  { background: #fef6ea;  border-left-color: #ff9800; }
+    .discrepancy-item.sev-minor  { background: #fdfbe9; border-left-color: #d4b800; }
 
     .discrepancy-header {
       display: flex;
       justify-content: space-between;
       align-items: baseline;
       gap: 10px;
-      font-weight: bold;
+      font-weight: 700;
       margin-bottom: 8px;
+      color: #14171f;
     }
     .tag {
       display: inline-block;
-      padding: 2px 8px;
-      border-radius: 10px;
+      padding: 3px 10px;
+      border-radius: 999px;
       font-size: 11px;
-      font-weight: bold;
+      font-weight: 700;
       text-transform: uppercase;
+      letter-spacing: .3px;
     }
     .sev-tag-critical { background: #f44336; color: #fff; }
     .sev-tag-major    { background: #ff9800; color: #fff; }
-    .sev-tag-minor    { background: #ffeb3b; color: #333; }
-    .type-tag         { background: #555;    color: #ddd; }
+    .sev-tag-minor    { background: #e8d200; color: #3a3300; }
+    .type-tag         { background: #14171f; color: #fff; }
 
     .side-by-side {
       display: grid;
@@ -87,53 +167,61 @@
       margin: 10px 0;
     }
     .side {
-      background: #262626;
-      padding: 10px;
-      border-radius: 4px;
+      background: #ffffff;
+      border: 1px solid #e2e6ec;
+      padding: 10px 12px;
+      border-radius: 10px;
       font-size: 13px;
     }
     .side .side-label {
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: .5px;
-      color: #2196F3;
+      color: #2f6fed;
+      font-weight: 700;
       margin-bottom: 4px;
     }
-    .side.side-b .side-label { color: #CE93D8; }
-    .side .ref { color: #888; font-size: 11px; margin-top: 6px; }
+    .side.side-b .side-label { color: #7c3aed; }
+    .side .ref { color: #8a90a0; font-size: 11px; margin-top: 6px; }
 
     .rfi-card {
-      background: #333;
+      background: #f5f7fa;
       border-left: 4px solid #4CAF50;
-      border-radius: 4px;
-      padding: 14px;
+      border-radius: 10px;
+      padding: 16px;
       margin-bottom: 14px;
     }
-    .rfi-card h4 { margin: 0 0 4px 0; color: #4CAF50; }
-    .rfi-card .rfi-meta { font-size: 12px; color: #aaa; margin-bottom: 10px; }
+    .rfi-card h4 {
+      margin: 0 0 4px 0;
+      color: #2e7d32;
+      font-family: 'Poppins', 'Inter', sans-serif;
+      font-size: 15px;
+    }
+    .rfi-card .rfi-meta { font-size: 12px; color: #8a90a0; margin-bottom: 10px; }
     .rfi-field { margin-bottom: 10px; }
     .rfi-field label {
       display: block;
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: .5px;
-      color: #999;
+      color: #8a90a0;
       margin-bottom: 3px;
     }
     .rfi-field textarea {
       width: 100%;
-      background: #262626;
-      color: #eee;
-      border: 1px solid #444;
-      border-radius: 4px;
+      background: #ffffff;
+      color: #14171f;
+      border: 1px solid #d7dbe3;
+      border-radius: 8px;
       padding: 8px;
       font-family: inherit;
       font-size: 13px;
       resize: vertical;
+      box-sizing: border-box;
     }
     .rfi-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .rfi-actions button { padding: 6px 14px; font-size: 13px; }
-    .rfi-status { font-size: 12px; color: #4CAF50; }
+    .rfi-actions button { padding: 6px 14px; font-size: 13px; margin-top: 0; }
+    .rfi-status { font-size: 12px; color: #2e7d32; font-weight: 600; }
 
     .stat-row {
       display: grid;
@@ -142,47 +230,55 @@
       margin: 12px 0;
     }
     .stat {
-      background: #333;
-      padding: 10px 12px;
-      border-radius: 6px;
+      background: #f5f7fa;
+      border: 1px solid #e2e6ec;
+      padding: 12px 14px;
+      border-radius: 12px;
     }
-    .stat .stat-value { font-size: 20px; font-weight: bold; }
-    .stat .stat-label { font-size: 11px; color: #aaa; text-transform: uppercase; }
+    .stat .stat-value { font-size: 20px; font-weight: 700; color: #14171f; }
+    .stat .stat-label { font-size: 11px; color: #8a90a0; text-transform: uppercase; }
 
     .warning-box {
-      background: rgba(255, 152, 0, 0.15);
+      background: #fef6ea;
       border-left: 4px solid #ff9800;
-      padding: 10px;
+      padding: 10px 12px;
       margin: 8px 0;
-      border-radius: 4px;
+      border-radius: 10px;
+      color: #7a4a00;
     }
     .confidence-badge {
       display: inline-block;
-      padding: 4px 12px;
-      border-radius: 12px;
+      padding: 4px 14px;
+      border-radius: 999px;
       font-size: 12px;
-      font-weight: bold;
+      font-weight: 700;
+      letter-spacing: .3px;
     }
     .confidence-high   { background: #4CAF50; color: #fff; }
     .confidence-medium { background: #ff9800; color: #fff; }
     .confidence-low    { background: #f44336; color: #fff; }
 
-    .download-link { color: #FFD700; }
-    .muted { color: #999; font-size: 13px; }
+    .download-link { color: #2f6fed; font-weight: 600; }
+    .muted { color: #8a90a0; font-size: 13px; }
   </style>
 </head>
 
 <body>
 
-<div id="loading-overlay" class="loading-overlay" style="display:none;">
-  <div id="loading-text">Processing...</div>
+<div id="loading-bar" class="loading-bar" style="display:none;">
+  <div class="loading-bar-row">
+    <span id="loading-text">Processing...</span>
+    <button id="interrupt-btn" type="button" class="link-btn">Interrupt run</button>
+  </div>
+  <div class="loading-track"><div class="loading-fill"></div></div>
 </div>
 
 <div class="container">
 
   <header class="header">
+    <img src="/static/Rowad-Logo.png" alt="Rowad" class="logo">
     <div class="title-block">
-      <h1>ROWAD AI - ConflictScan</h1>
+      <h1>ConflictScan</h1>
       <p>
         Compare any two documents from different stages of the same project.<br>
         Discrepancies are detected, ranked, and turned into draft RFIs for the client.
@@ -190,9 +286,31 @@
     </div>
   </header>
 
-  <!-- ===================== INPUT ===================== -->
-  <section class="panel">
-    <label><strong>Project Name</strong></label>
+  <!-- ===================== STEP 1: RFI FORM DETAILS ===================== -->
+  <section id="page-1" class="panel">
+    <h2>Step 1 of 2 &middot; RFI form details</h2>
+    <p class="hint">Filled into the header of every RFI form generated for this scan. All optional.</p>
+    <div class="meta-grid">
+      <div><label>Consultant</label><input id="meta_consultant" type="text" placeholder="e.g. Dar Al Handasah"></div>
+      <div><label>Employer</label><input id="meta_employer" type="text" placeholder="e.g. ALSTOM Egypt"></div>
+      <div><label>Project code</label><input id="meta_project_code" type="text"></div>
+      <div><label>To</label><input id="meta_to" type="text" placeholder="RFI recipient"></div>
+      <div><label>Location</label><input id="meta_location" type="text"></div>
+      <div><label>BOQ No.</label><input id="meta_boq_no" type="text"></div>
+      <div><label>Dwg No.</label><input id="meta_dwg_no" type="text"></div>
+      <div><label>Level</label><input id="meta_level" type="text"></div>
+      <div><label>Specs No.</label><input id="meta_specs_no" type="text"></div>
+    </div>
+
+    <button id="page1-next-btn" style="margin-top:16px;">Next: Documents &amp; Scan &rarr;</button>
+  </section>
+
+  <!-- ===================== STEP 2: DOCUMENTS & SCAN ===================== -->
+  <section id="page-2" class="panel" style="display:none;">
+    <h2>Step 2 of 2 &middot; Documents &amp; Scan</h2>
+    <button id="page2-back-btn" type="button" class="link-btn">&larr; Back to RFI form details</button>
+
+    <label style="margin-top:16px;"><strong>Project Name</strong></label>
     <input id="project_name" type="text" placeholder="e.g. ALSTOM Borg El Arab">
 
     <div class="doc-pair" style="margin-top:16px;">
@@ -230,9 +348,6 @@
 
     <div style="margin-top:14px;" class="muted">
       RFI form: <span id="template-status">checking...</span>
-      &nbsp;|&nbsp;
-      <label for="rfi_template_file" style="display:inline; cursor:pointer; color:#FFD700;">upload a form</label>
-      <input id="rfi_template_file" type="file" accept=".docx" style="display:none;">
     </div>
   </section>
 
@@ -270,10 +385,12 @@
 <script>
 document.addEventListener("DOMContentLoaded", () => {
 
-  const overlay      = document.getElementById("loading-overlay");
+  const loadingBar   = document.getElementById("loading-bar");
   const loadingText  = document.getElementById("loading-text");
+  const interruptBtn = document.getElementById("interrupt-btn");
   const errorEl      = document.getElementById("error");
   let   currentEventId = null;
+  let   scanController = null;
 
   const steps = [
     "Reading both documents...",
@@ -287,7 +404,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let stepTimer = null;
 
   function showLoading() {
-    overlay.style.display = "flex";
+    loadingBar.style.display = "block";
     let i = 0;
     loadingText.innerText = steps[0];
     stepTimer = setInterval(() => {
@@ -297,9 +414,13 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function hideLoading() {
-    overlay.style.display = "none";
+    loadingBar.style.display = "none";
     if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
   }
+
+  interruptBtn.addEventListener("click", () => {
+    if (scanController) scanController.abort();
+  });
 
   function showError(message) {
     errorEl.style.display = "block";
@@ -317,6 +438,23 @@ document.addEventListener("DOMContentLoaded", () => {
     return div.innerHTML;
   };
 
+  // ---------------- Step navigation ----------------
+
+  const page1 = document.getElementById("page-1");
+  const page2 = document.getElementById("page-2");
+
+  document.getElementById("page1-next-btn").addEventListener("click", () => {
+    page1.style.display = "none";
+    page2.style.display = "block";
+    window.scrollTo(0, 0);
+  });
+
+  document.getElementById("page2-back-btn").addEventListener("click", () => {
+    page2.style.display = "none";
+    page1.style.display = "block";
+    window.scrollTo(0, 0);
+  });
+
   // ---------------- RFI template status ----------------
 
   async function loadTemplateStatus() {
@@ -330,18 +468,6 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("template-status").innerText = "unavailable";
     }
   }
-
-  document.getElementById("rfi_template_file").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append("template", file);
-    const res  = await fetch("/api/rfi-template", { method: "POST", body: fd });
-    const data = await res.json();
-    if (data.error) { showError(data.error); return; }
-    clearError();
-    loadTemplateStatus();
-  });
 
   loadTemplateStatus();
 
@@ -371,16 +497,31 @@ document.addEventListener("DOMContentLoaded", () => {
     if (fileA) fd.append("document_a_file", fileA);
     if (fileB) fd.append("document_b_file", fileB);
 
+    const META_FIELDS = [
+      "consultant", "employer", "project_code", "to",
+      "location", "boq_no", "dwg_no", "level", "specs_no",
+    ];
+    META_FIELDS.forEach(field => {
+      fd.append(field, document.getElementById("meta_" + field).value);
+    });
+
+    scanController = new AbortController();
     showLoading();
 
     let data;
     try {
-      const res = await fetch("/scan", { method: "POST", body: fd });
+      const res = await fetch("/scan", { method: "POST", body: fd, signal: scanController.signal });
       data = await res.json();
     } catch (fetchErr) {
       hideLoading();
-      showError("Network error: " + fetchErr.message);
+      if (fetchErr.name === "AbortError") {
+        showError("Scan interrupted.");
+      } else {
+        showError("Network error: " + fetchErr.message);
+      }
       return;
+    } finally {
+      scanController = null;
     }
     hideLoading();
 
@@ -486,6 +627,17 @@ document.addEventListener("DOMContentLoaded", () => {
     renderRfis(data.rfi_items || []);
   }
 
+  const DISCIPLINE_OPTIONS = [
+    ["survey",       "Survey"],
+    ["civil",        "Civil"],
+    ["structural",   "Structural"],
+    ["electrical",   "Electrical"],
+    ["mechanical",   "Mechanical"],
+    ["plumbing",     "Plumbing"],
+    ["architectural","Architectural"],
+    ["other",        "Other"],
+  ];
+
   const RFI_FIELDS = [
     ["subject",             "Subject",              1],
     ["background",          "Background",           3],
@@ -516,10 +668,18 @@ document.addEventListener("DOMContentLoaded", () => {
           <textarea rows="${rows}" data-field="${key}">${esc(rfi[key] || "")}</textarea>
         </div>`).join("");
 
+      const currentDiscipline = (rfi.discipline || "").toLowerCase();
+      const disciplineOptionsHtml = DISCIPLINE_OPTIONS.map(([value, label]) =>
+        `<option value="${value}"${value === currentDiscipline ? " selected" : ""}>${label}</option>`
+      ).join("");
+
       card.innerHTML = `
         <h4>${esc(rfi.rfi_no)} &mdash; ${esc(rfi.subject)}</h4>
         <div class="rfi-meta">
-          From ${esc(rfi.discrepancy_id)} &middot; ${esc(rfi.discipline)} &middot;
+          From ${esc(rfi.discrepancy_id)} &middot;
+          <label style="display:inline;">Discipline
+            <select data-field="discipline" style="margin-left:4px;">${disciplineOptionsHtml}</select>
+          </label> &middot;
           priority ${esc(rfi.priority)} &middot; response by ${esc(rfi.response_required_by)}
         </div>
         ${fieldsHtml}
@@ -535,7 +695,7 @@ document.addEventListener("DOMContentLoaded", () => {
       card.querySelector(".regen-btn").addEventListener("click", async () => {
         const status = card.querySelector(".rfi-status");
         const edited = { ...rfi };
-        card.querySelectorAll("textarea[data-field]").forEach(t => {
+        card.querySelectorAll("textarea[data-field], select[data-field]").forEach(t => {
           edited[t.dataset.field] = t.value;
         });
 

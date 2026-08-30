@@ -56,6 +56,8 @@ class DocumentProfile(TypedDict):
     source_name: str               # original filename, or "pasted text"
     char_count: int
     chunk_count: int
+    total_chunk_count: int         # chunk count for the whole document, before any focus sectioning
+    focus_status: str              # no_focus | sectioned | no_headings_found | no_relevant_headings | selection_failed
     requirements: List[Dict[str, Any]]   # atomic statements the doc asserts
     quantities: List[Dict[str, Any]]     # numeric/measurable commitments
     standards: List[str]                 # ASTM / BS / EN / ECP / ISO refs
@@ -136,6 +138,7 @@ class ConflictScanState(TypedDict):
 
     # --- RFI drafting ------------------------------------------------------
     rfi_template_path: Optional[str]                # .docx template to fill
+    rfi_form_meta: Annotated[Dict[str, Any], merge_dicts]  # consultant, employer, project_code, to, location, boq_no, dwg_no, level, specs_no
     rfi_items: Annotated[List[RFIItem], add_to_list]
     rfi_paths: Annotated[List[str], add_to_list]    # generated .docx files
     rfi_drafted: Optional[bool]
@@ -180,6 +183,7 @@ def create_initial_state() -> ConflictScanState:
         scan_complete=False,
 
         rfi_template_path=None,
+        rfi_form_meta={},
         rfi_items=[],
         rfi_paths=[],
         rfi_drafted=False,

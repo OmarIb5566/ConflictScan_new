@@ -89,6 +89,7 @@ def run_conflict_scan(
     project_name: str = None,
     review_focus: str = None,
     rfi_template_path: str = None,
+    rfi_form_meta: Dict[str, Any] = None,
     export_format: str = "excel",
 ) -> Dict[str, Any]:
     """
@@ -114,6 +115,7 @@ def run_conflict_scan(
         "document_b_source": document_b_source,
         "review_focus": review_focus or "",
         "rfi_template_path": rfi_template_path,
+        "rfi_form_meta": rfi_form_meta or {},
         "export_format": export_format,
     })
 

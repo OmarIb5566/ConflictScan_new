@@ -29,7 +29,53 @@ import os
 import re
 from typing import Dict, Any, List
 
+from docx.oxml.ns import qn
+
 TOKEN_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+
+# The company RFI form's Discipline row uses real Word checkbox content
+# controls (w:sdt / w14:checkbox), not text tokens - they can't be filled by
+# _substitute(). This ticks the one matching the drafted discipline and
+# leaves the rest unchecked, in the order they appear in the form.
+DISCIPLINE_CHECKBOX_ORDER = [
+    "survey", "civil", "structural", "electrical",
+    "mechanical", "plumbing", "arch", "other",
+]
+DISCIPLINE_ALIASES = {
+    "architectural": "arch",
+    "architecture": "arch",
+    "contractual": "other",
+    "general": "other",
+}
+CHECKBOX_CHECKED = "☒"    # ☒
+CHECKBOX_UNCHECKED = "☐"  # ☐
+
+
+def _normalise_discipline(value: str) -> str:
+    key = (value or "").strip().lower()
+    key = DISCIPLINE_ALIASES.get(key, key)
+    return key if key in DISCIPLINE_CHECKBOX_ORDER else "other"
+
+
+def _tick_discipline_checkboxes(document, discipline_value: str) -> None:
+    """Tick the Discipline checkbox matching *discipline_value*; uncheck the rest."""
+    if not discipline_value:
+        return
+    target = _normalise_discipline(discipline_value)
+
+    checkbox_sdts = [
+        sdt for sdt in document.element.body.iter(qn("w:sdt"))
+        if sdt.find(".//" + qn("w14:checkbox")) is not None
+    ]
+    for name, sdt in zip(DISCIPLINE_CHECKBOX_ORDER, checkbox_sdts):
+        is_target = name == target
+        checkbox = sdt.find(".//" + qn("w14:checkbox"))
+        checked_el = checkbox.find(qn("w14:checked")) if checkbox is not None else None
+        if checked_el is not None:
+            checked_el.set(qn("w14:val"), "1" if is_target else "0")
+        glyph_run = sdt.find(".//" + qn("w:t"))
+        if glyph_run is not None:
+            glyph_run.text = CHECKBOX_CHECKED if is_target else CHECKBOX_UNCHECKED
 
 
 def _substitute(text: str, values: Dict[str, Any]) -> str:
@@ -113,6 +159,7 @@ def fill_docx_template(template_path: str, output_path: str, values: Dict[str, A
 
     # Body
     _fill_container(document, values)
+    _tick_discipline_checkboxes(document, values.get("discipline"))
 
     # Headers and footers, per section
     for section in document.sections:

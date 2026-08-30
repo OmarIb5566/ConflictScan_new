@@ -4,7 +4,7 @@ import time
 import re
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "qwen3:14b"
+MODEL_NAME = "gemma4:e4b"
 
 class OllamaLLM:
     def __init__(self, model: str = MODEL_NAME, url: str = OLLAMA_URL):

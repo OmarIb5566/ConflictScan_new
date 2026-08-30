@@ -45,7 +45,7 @@ DEFAULT_RESPONSE_DAYS = 7       # working-day allowance quoted on the form
 
 # Where a project RFI form is looked up when the caller does not name one
 DEFAULT_TEMPLATE_DIR = os.path.join(os.getcwd(), "templates_rfi")
-DEFAULT_TEMPLATE_NAME = "rfi_template.docx"
+DEFAULT_TEMPLATE_NAME = "F-PQP-01-03 Request For Information.docx"
 
 PRIORITY_BY_SEVERITY = {
     "critical": "high",
@@ -184,8 +184,9 @@ def resolve_template_path(explicit_path: str = None) -> str:
 
     Order of preference:
     1. *explicit_path*, when the caller named one.
-    2. templates_rfi/rfi_template.docx
-    3. the first .docx found in templates_rfi/ (so dropping the client's form
+    2. templates_rfi/F-PQP-01-03 Request For Information.docx (the company's
+       official RFI form)
+    3. the first .docx found in templates_rfi/ (so dropping a different form
        into that folder is enough to start using it)
 
     Returns "" when no template is available.
@@ -220,12 +221,22 @@ def build_token_values(
     """
     today = datetime.now()
     due = today + timedelta(days=DEFAULT_RESPONSE_DAYS)
+    form_meta = state.get("rfi_form_meta") or {}
 
     return {
         "rfi_no":               rfi.get("rfi_no", ""),
         "rfi_date":             today.strftime("%d %B %Y"),
         "response_required_by": rfi.get("response_required_by") or due.strftime("%d %B %Y"),
         "project_name":         state.get("project_name") or "",
+        "consultant":           form_meta.get("consultant", ""),
+        "employer":             form_meta.get("employer", ""),
+        "project_code":         form_meta.get("project_code", ""),
+        "to":                   form_meta.get("to", ""),
+        "location":             form_meta.get("location", ""),
+        "boq_no":               form_meta.get("boq_no", ""),
+        "dwg_no":               form_meta.get("dwg_no", ""),
+        "level":                form_meta.get("level", ""),
+        "specs_no":             form_meta.get("specs_no", ""),
         "discipline":           rfi.get("discipline", ""),
         "priority":             rfi.get("priority", ""),
         "subject":              rfi.get("subject", ""),
