@@ -42,8 +42,14 @@ substituting — a token still resolves even if Word has fragmented it.
 | `{{level}}` | Level entered on the scan form |
 | `{{specs_no}}` | Specs number entered on the scan form |
 | `{{originator}}` | User who ran the scan |
-| `{{discrepancy_id}}` | Register reference for the underlying finding, `D-001` |
+| `{{discrepancy_id}}` | Register references of every finding in the RFI, `D-001, D-004` |
 | `{{subject}}` | One-line subject of the RFI |
+| `{{area}}` | Block / building / area the RFI concerns (also fills `{{location}}` when the form field was left blank) |
+| `{{description}}` | Full RFI body: background, numbered points, commercial note |
+| `{{attachments}}` | Numbered list of the sources to attach (file - sheet/page) |
+| `{{attachment_count}}` | Number of attachments, or `No attachment` |
+| `{{commercial_note}}` | Neutral variation-order note, when a point may add scope |
+| `{{request_type}}` | which governs / provide information / confirm scope / resolve clash / ... |
 | `{{discipline}}` | civil / structural / architectural / mechanical / electrical / plumbing / contractual / general |
 | `{{priority}}` | high / medium / low, derived from the discrepancy severity |
 | `{{document_a_label}}` | Stage label of the first document, e.g. `Tender BOQ` |
@@ -51,8 +57,8 @@ substituting — a token still resolves even if Word has fragmented it.
 | `{{document_b_label}}` | Stage label of the second document, e.g. `IFC Specifications` |
 | `{{document_b_reference}}` | Clause, section, or item reference quoted in that document |
 | `{{background}}` | Context: which documents are involved and why it matters |
-| `{{discrepancy_summary}}` | Both positions stated neutrally |
-| `{{question}}` | The single clarification put to the client |
+| `{{discrepancy_summary}}` | The RFI's numbered points, each naming every source with its reference and value |
+| `{{question}}` | The question for each point, numbered to match |
 | `{{proposed_solution}}` | Contractor's suggested way forward, offered for approval |
 | `{{cost_impact}}` | Cost consequence, or "To be assessed on receipt of clarification" |
 | `{{schedule_impact}}` | Programme consequence, or the same fallback |

@@ -21,29 +21,45 @@ from typing import Dict, Any, List
 REGISTER_COLUMNS = [
     ("id", "ID"),
     ("severity", "Severity"),
+    ("issue_class", "Issue class"),
     ("type", "Type"),
+    ("scope", "Scope"),
+    ("category", "Category"),
     ("discipline", "Discipline"),
+    ("location", "Location"),
     ("topic", "Topic"),
     ("description", "Description"),
     ("document_a_says", "{label_a} states"),
     ("document_a_reference", "{label_a} reference"),
     ("document_b_says", "{label_b} states"),
     ("document_b_reference", "{label_b} reference"),
+    ("evidence", "All sources quoted"),
+    ("low_confidence", "Verify (OCR / partly legible)"),
     ("impact", "Impact"),
     ("suggested_question", "Clarification sought"),
 ]
 
+# Mirrors how project RFI logs are kept: subject, description, area/block,
+# attachments - so the drafts can be pasted straight into the live log.
 RFI_COLUMNS = [
     ("rfi_no", "RFI No."),
-    ("discrepancy_id", "Discrepancy"),
-    ("priority", "Priority"),
+    ("revision", "Rev."),
     ("discipline", "Discipline"),
     ("subject", "Subject"),
+    ("description", "Description"),
+    ("area", "Block / Area"),
+    ("attachments", "Attachments"),
+    ("points_count", "Points"),
+    ("discrepancy_id", "Discrepancies"),
+    ("priority", "Priority"),
+    ("request_type", "Request type"),
     ("question", "Question to client"),
     ("proposed_solution", "Proposed way forward"),
     ("cost_impact", "Cost impact"),
     ("schedule_impact", "Programme impact"),
+    ("commercial_note", "Commercial note"),
     ("response_required_by", "Response required by"),
+    ("status", "Status"),
     ("docx_file", "RFI document"),
 ]
 
@@ -59,10 +75,21 @@ def _register_rows(discrepancies: List[Dict[str, Any]], label_a: str, label_b: s
         title.format(label_a=label_a, label_b=label_b)
         for _key, title in REGISTER_COLUMNS
     ]
-    rows = [
-        [str(disc.get(key, "") or "") for key, _title in REGISTER_COLUMNS]
-        for disc in discrepancies
-    ]
+
+    def cell(disc, key):
+        value = disc.get(key, "")
+        if key == "evidence":
+            return "\n".join(
+                f"[{e.get('document', '')}] {e.get('file', '')} | {e.get('reference', '')}: {e.get('says', '')}"
+                for e in (value or [])
+            )
+        if key == "low_confidence":
+            return "yes" if value else ""
+        if key == "scope":
+            return {"between": "between sets", "within_a": "within set A", "within_b": "within set B"}.get(value, value or "")
+        return str(value or "")
+
+    rows = [[cell(disc, key) for key, _title in REGISTER_COLUMNS] for disc in discrepancies]
     return headers, rows
 
 
@@ -76,6 +103,16 @@ def _rfi_rows(rfi_items: List[Dict[str, Any]]):
             if key == "docx_file":
                 path = rfi.get("docx_path")
                 row.append(os.path.basename(path) if path else "not generated")
+            elif key == "attachments":
+                row.append("\n".join(rfi.get("attachments") or []) or "No attachment")
+            elif key == "points_count":
+                row.append(str(len(rfi.get("points") or []) or 1))
+            elif key == "revision":
+                row.append("00")
+            elif key == "status":
+                row.append("Draft")
+            elif key == "request_type":
+                row.append(str(rfi.get(key) or "").replace("_", " "))
             else:
                 row.append(str(rfi.get(key, "") or ""))
         rows.append(row)

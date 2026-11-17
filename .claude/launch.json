@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rowad-conflictscan",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["api.py"],
+      "port": 5000
+    }
+  ]
+}

@@ -1,77 +1,84 @@
 # ConflictScan / RFI Automation
 
-A LangGraph agent that compares **any two documents from different stages of
-the same project**, reports the discrepancies between them, and drafts an
-**RFI (Request For Information)** for each one so the engineer can send it to
-the client for clarification.
+A LangGraph agent that compares **two document sets from different stages or
+disciplines of the same project**, reports the discrepancies between them and
+within each of them, and drafts **RFIs (Requests For Information)** the
+engineer can edit and send to the consultant.
 
-The pipeline is document-agnostic. It has no notion of BOQs, specifications, or
-material lists — the two inputs are just "document A" and "document B", each
-carrying a stage label the user types in (`Tender BOQ`, `IFC Specifications`,
-`100% DD Drawings`, `Addendum No. 2`, …). Those labels flow verbatim through
+Each side is a *set* of files - drawings, BOQ, specifications, schedules,
+sketches - labelled with a stage name the user types in (`Tender BOQ + Specs`,
+`IFC Structural`, `Addendum No. 2`, …). Those labels flow verbatim through
 every prompt, every finding, and every RFI.
+
+## What the model learned from real RFIs
+
+The detection and drafting logic is driven by a knowledge base built from two
+corpora of real contractor RFIs - 612 RFIs from an infrastructure / mixed-use
+project and a multi-building business district (logs, forms, attachments and
+consultant replies) - written in project-neutral terms; see
+`knowledge/rfi_taxonomy.json` and the per-project measurements in
+`knowledge/corpus_stats/`.
+
+The second corpus added plan-vs-schedule mismatches (column, footing, door
+schedules), architectural-vs-structural alignment (blockwork vs beams, slab
+edges, openings and shafts missing from structure, FFL vs slab levels),
+inconsistencies between buildings or floors of the same type, and conflicts
+between approved submittals / shop drawings and the IFC or BOQ.
+
+| Observed in the corpus | How the pipeline uses it |
+|---|---|
+| RFIs fall into ~13 recurring issue types: value conflicts between documents, sheet-vs-sheet inconsistencies, cross-discipline mismatches, physical clashes, level/grading conflicts, missing information, BOQ scope gaps, design changes between revisions, tie-ins/scope boundaries, code/constructability problems... | Every finding carries an `issue_class`; prompts list what to look for and what is **not** a discrepancy; severity/type defaults come from the class |
+| 45% electrical, 29% mechanical, 23% architectural, 18% civil/structural | Analysis framework and drawing reader are multi-discipline (single-line and riser diagrams, panel schedules, levels, finishes, scope) |
+| Median 2, up to 19 attachments per RFI; 65% have more than one | Each side accepts any number of files, each read and cited by name |
+| Only 22% of attachment pages have a text layer | Scanned pages are OCR-read (bilingual Arabic/English); OCR-derived findings are flagged *verify* and never critical |
+| Many conflicts are *within* one package (one load fed from two transformers on two SLD sheets) | An internal-consistency pass checks each set against itself |
+| Conflicts are tied to a physical place (section, axis, building, panel, tag) | Items are compared only when they can describe the same element at the same place |
+| Engineers group related points into one RFI (up to 11 numbered points), quote every source with its reference and value, and flag variation-order exposure | RFIs are consolidated by discipline and area into numbered points in that house style |
+
+The knowledge base is meant to grow: run `tools/analyze_rfi_log.py` on another
+project's RFI log to measure its issue mix, and extend the taxonomy cues -
+nothing in it is specific to the project the corpus came from.
 
 ## Flow
 
 ```
-receive_input          validate both documents, normalise their stage labels
+receive_input          validate both document sets, normalise their stage labels
       |
-analyze_documents      chunk and profile EACH document independently
-      |                (every chunk is sent to the LLM - nothing is sampled)
-conflict_scan          compare the two profiles -> discrepancy register
-      |
+analyze_documents      read every file of each set:
+      |                  documents -> text (OCR for scanned pages) -> chunked extraction
+      |                  drawings  -> rendered, tiled, vision-read against a baseline
+      |                               built from the other set's documents
+conflict_scan          1. location-aware alignment of the two sets
+      |                2. pair review          (value conflicts, mismatches, levels...)
+      |                3. internal consistency (each set against itself)
+      |                4. interface review     (items sharing a place across files/disciplines)
+      |                5. coverage review      (scope gaps, missing information, open items)
+      |                6. quantities           (arithmetic, no LLM)
+      |                -> calibrate, merge near-duplicates, rank -> register
  (any findings?) --no--> export
       | yes
-draft_rfi              one draft RFI per discrepancy, filled into the .docx form
-      |
+draft_rfi              group related findings into RFIs with numbered points,
+      |                draft in house style, fill the .docx form
 export                 discrepancy register + RFI log
-      |
-     END
 ```
+
+### Why items are only compared at the same place
+
+Different sheets show different places, and their values legitimately differ.
+Two items are paired only when nothing says they are at different places
+(building, floor, section, grid, element tag), and two *drawing* items must
+positively share an anchor - a tag, place, section, grid or the same sheet
+number. A position on the sheet ("bottom-right corner") is never a location.
+Without this rule, comparing a fence-foundation sheet with a retaining-wall
+sheet produced dozens of false "level datum" conflicts; with it, the two
+sheets' geometry is reviewed together for the clash an engineer would raise.
 
 ### Why each document is profiled alone
 
-`analyze_documents` reads each document without knowing what the other says.
-That keeps extraction honest: the model records what a document asserts rather
-than hunting for agreement with its counterpart. Comparison is a separate,
-explicit step.
-
-### How the comparison works
-
-`conflict_scan` runs four passes:
-
-1. **Alignment** — requirements from A and B are paired by keyword overlap on
-   topic and statement.
-2. **Pair review** — candidate pairs go to the LLM in batches; it decides which
-   pairs genuinely conflict and writes the finding with both sides quoted.
-   Clause references are re-attached from our own records, not from the model.
-3. **Coverage review** — requirements present in only one document are reviewed
-   as potential omissions, in both directions.
-4. **Quantities** — quantity items matched by description are compared
-   arithmetically. Amount deviations beyond 1% and unit-of-measure mismatches
-   are raised **without an LLM call**, so those findings are exact and
-   reproducible.
-
-Findings are de-duplicated, ranked critical → major → minor, and numbered
-`D-001`, `D-002`, …
-
-The scan summary is a factual tally computed from the register itself. The
-pipeline deliberately does **not** generate a unified prose description of the
-project — the deliverable is the discrepancy register and the RFIs.
-
-### RFI drafting
-
-`draft_rfi` turns each discrepancy into a formal RFI. The model is instructed
-to **ask, never decide**: an RFI sets out both positions neutrally and puts one
-answerable question to the client. It never asserts which document governs.
-
-Each RFI is then written into the project's own `.docx` RFI form by `{{token}}`
-substitution, so the client's letterhead, tables, and footer survive untouched.
-See [templates_rfi/README.md](templates_rfi/README.md) for the token list and
-how to install your own form.
-
-If no form is present, drafting still runs — the RFI text appears on screen for
-review and editing, and only the Word output is skipped.
+`analyze_documents` reads each file without knowing what the other set says,
+so extraction records what a document asserts rather than hunting for
+agreement. Drawings are the one exception: they are read against a checklist
+of *what to look for* from the other set (never the values).
 
 ## Quick start
 
@@ -79,8 +86,7 @@ review and editing, and only the Word output is skipped.
 pip install -r requirements.txt
 ```
 
-The agent uses a local Ollama model (`qwen3:14b` by default — see
-`nodes/llm_client.py`):
+The agent uses local Ollama models (`nodes/llm_client.py`, `nodes/vision_client.py`):
 
 ```bash
 ollama serve
@@ -92,28 +98,126 @@ python api.py
 
 Then open http://localhost:5000.
 
+### Models
+
+| Role | Default | Override (environment variable) |
+|---|---|---|
+| Text extraction, comparison, drafting | `gemma4:e4b` | `CONFLICTSCAN_TEXT_MODEL` |
+| Drawing reading (vision) | `gemma4:e4b` | `CONFLICTSCAN_VISION_MODEL` |
+| OCR of scanned pages | first installed of `qwen2.5vl:7b`, `glm-ocr`, else the vision model | `CONFLICTSCAN_OCR_MODEL` |
+| "Is this scanned page a drawing?" | `qwen2.5vl` when installed, else the vision model | `CONFLICTSCAN_PAGE_KIND_MODEL` |
+| Context window requested from Ollama | 16384 tokens | `CONFLICTSCAN_NUM_CTX` |
+
+The context window is always requested explicitly: Ollama otherwise falls back
+to a small default and silently drops the start of long prompts - the
+instructions.
+
 ## Web interface
 
-1. Enter the project name.
-2. Fill both document slots — upload a file (PDF / Word / Excel / TXT) or paste
-   text, and give each one a stage label.
-3. Optionally set a review focus to narrow what the scan looks at.
-4. Run the scan.
+The web app is a multi-user workspace. Everyone signs in (the first visitor
+creates the first account), and all work is saved on the server under
+`data/`, so any scan can be reopened later at any stage.
 
-Results show the discrepancy register side by side (what A says vs what B
-says, with references), followed by the draft RFIs. **Every RFI field is
-editable in the browser** — edit it, click *Regenerate Word document*, and the
-revised RFI is written to `exports/`.
+- **Projects and revisions.** A *project* holds every scan of one job. Each
+  scan is a *revision* (Rev 1, Rev 2, ...) that keeps its uploaded files,
+  settings, results and your edits. Projects are visible to the whole team
+  unless the owner marks them private. Only the owner can delete a project or
+  change who can see it.
+- **Home dashboard.** Shows stats, *Continue where you left off*, and a
+  projects table you can search, filter (mine / shared / pinned / archived)
+  and sort.
+- **Tabs.** Projects and scans open in browser-style tabs. Your open tabs
+  are restored the next time you sign in, on any device. You can drag tabs to
+  reorder them, middle-click to close one, and right-click for more. Every
+  tab has a link you can share (`#/run/<id>/<stage>`).
+- **Five stages per scan:** *Details* (RFI form header) -> *Documents* (name
+  each set, drag in files; they upload straight away and show the detected
+  type) -> *Scan* (focus / precedence / grouping, a readiness checklist, then
+  run) -> *Findings* -> *RFIs*. Everything saves automatically as you type.
+- **Background scans.** A scan runs on the server. You get live per-stage
+  progress and a log, and you can cancel it. You can close the tab, and you
+  get a notification (in the app and on the desktop) when the scan finishes.
+  The sidebar lists every scan in progress.
+- **Edit results without re-running.**
+  - On *Findings*, accept or dismiss each finding, change its severity, and
+    add reviewer notes. You can filter by severity, status, scope, issue type
+    or text, and use keyboard triage (J/K, A/D/U).
+  - On *RFIs*, edit any field (autosaved), set a status (draft / ready /
+    issued / closed), add an RFI by hand (or *Draft an RFI* from a finding),
+    revert to the AI draft, delete RFIs, regenerate one or all Word
+    documents, and download everything as a .zip.
+  - *Rebuild register* re-writes the Excel register with your edits. Dismissed
+    findings are left out.
+- **Edit & re-run.** This makes a new revision with the same files and
+  settings already filled in. You change only what you need, and the earlier
+  revision stays untouched.
+- Also included: Ctrl+K search over projects, scans and actions; `?` lists
+  the keyboard shortcuts; dark mode; and a layout that works on a phone.
+
+| Setting (environment variable) | Default | Meaning |
+|---|---|---|
+| `CONFLICTSCAN_DATA_DIR` | `./data` | Database, uploads and per-run exports |
+| `CONFLICTSCAN_WORKERS` | `1` | Scans run at once. Others queue. The local LLM is the bottleneck, so raise this only with more GPU capacity. |
+| `CONFLICTSCAN_ALLOW_SIGNUP` | `1` | `0` = only the very first account can self-register |
+| `CONFLICTSCAN_SECRET_KEY` | generated into `data/secret_key` | Session-cookie signing key. Set it explicitly when you run more than one server process. |
+| `CONFLICTSCAN_MAX_UPLOAD_MB` | `500` | Request size limit |
+| `CONFLICTSCAN_DEBUG` | `1` | `0` for shared use: the debug reloader restarts the server on file changes, which fails any running scan |
+
+The original single-page steps map onto the stages like this:
+
+1. Details - RFI form header fields (all optional).
+2. Documents - name each set and **add its files** (several at once, drag and
+   drop, or add more later). Each file's type is *Auto* by default and can be
+   set to *Document* or *Drawing*. A DXF with the same file name as a PDF is
+   read together with it.
+3. Scan - optionally a review focus, the contract's order of precedence (used
+   as context in proposed solutions, never to decide), and whether to group
+   related findings into one RFI (default) or draft one RFI per finding. Then
+   run the scan.
+
+Results show each set's files (pages, OCR pages, sheets, items), then each
+discrepancy with what every document says **verbatim**, side by side
+("<Set A> states" / "<Set B> states"), the issue class, scope (*between sets*
+or *within set A/B*) and a *verify* tag on OCR/partly legible evidence. Quotes
+are checked against the source text: a document's words are shown only when
+they really occur in it, otherwise the statement is marked as paraphrased.
+
+Draft RFIs are short: each numbered point is one sentence naming the element
+and the problem, followed by one line per source with its reference and its
+words in quotation marks, then one question per point. **Every RFI field is editable**. Edits save as you type. Click *Regenerate Word
+document* to write the revised RFI into that run's own exports folder.
 
 ## API
+
+Workspace endpoints used by the web app. They need a signed-in session cookie
+(see `/api/auth/*`).
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/auth/status`, `/register`, `/login`, `/logout` | GET/POST | Accounts and sessions |
+| `/api/me`, `/api/me/prefs` | PATCH / GET, PUT | Display name and password; open tabs, pins, theme |
+| `/api/projects` | GET, POST | Projects you can see, with run summaries / create one |
+| `/api/projects/<id>` | GET, PATCH, DELETE | Rename, describe, archive, set visibility / delete |
+| `/api/projects/<id>/runs` | POST | New draft revision (settings carried over; `from_run_id` copies files too) |
+| `/api/runs/<id>` | GET, PATCH, DELETE | One revision: inputs, files, progress, results, review |
+| `/api/runs/<id>/files` | POST | Upload files to set `a` or `b` (`slot`, `files`) |
+| `/api/runs/<id>/files/<fid>` | PATCH, DELETE | Change a file's kind or set / remove it |
+| `/api/runs/<id>/start`, `/cancel`, `/clone` | POST | Queue the scan / stop it / *Edit & re-run* |
+| `/api/runs/<id>/progress` | GET | Light status payload for polling |
+| `/api/runs/<id>/findings/<did>` | PATCH | Triage: `status`, `severity`, `note` |
+| `/api/runs/<id>/rfis[/<no>]` | POST, PUT, DELETE | Add / edit / delete an RFI; `/revert`, `/docx` sub-routes |
+| `/api/runs/<id>/docx-all`, `/register` | POST | Regenerate every RFI document / the register with edits |
+| `/api/runs/<id>/exports/<file>`, `/bundle` | GET | Download one output / everything as a .zip |
+| `/api/jobs` | GET | Your queued/running scans and ones that finished recently |
+
+Single-shot endpoints for scripts (no sign-in, nothing stored):
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/` | GET | Web interface |
 | `/api/health` | GET | Health check, including whether an RFI form is loaded |
-| `/scan` | POST | Run a conflict scan over two documents |
+| `/scan` | POST | Run a conflict scan over two document sets and wait for the result |
 | `/api/rfi-template` | GET | Which RFI form is in use, and its `{{tokens}}` |
-| `/api/rfi-template` | POST | Upload the project's `.docx` RFI form |
 | `/api/rfi/export` | POST | Regenerate one RFI `.docx` from edited fields |
 | `/exports/<filename>` | GET | Download a register or an RFI document |
 
@@ -121,68 +225,116 @@ revised RFI is written to `exports/`.
 
 | Field | Notes |
 |---|---|
-| `document_a_file` *or* `document_a_text` | One of the two is required |
-| `document_a_label` | Stage label, e.g. `Tender BOQ` |
-| `document_b_file` *or* `document_b_text` | One of the two is required |
-| `document_b_label` | Stage label, e.g. `IFC Specifications` |
-| `project_name` | Optional |
-| `review_focus` | Optional free text steering the scan |
+| `document_a_files` | One or more files (repeat the field) |
+| `document_a_file_kinds` | Optional JSON list aligned with the files: `"auto"`, `"document"` or `"drawing"` |
+| `document_a_text` | Optional pasted text, added to the set |
+| `document_a_label` | Stage label, e.g. `Tender BOQ + Specs` |
+| `document_b_*` | Same four fields for the second set |
+| `project_name`, `review_focus` | Optional |
+| `document_precedence` | Optional contract order of precedence |
+| `rfi_grouping` | `consolidated` (default) or `single` |
 | `user_id` | Optional; recorded as the RFI originator |
+
+The single-file fields of earlier versions (`document_a_file`,
+`document_a_is_drawing`, `document_a_drawing_pdf` / `_dxf`) are still accepted.
 
 ```bash
 curl -X POST http://localhost:5000/scan \
   -F "project_name=Borg El Arab" \
-  -F "document_a_label=Tender BOQ" \
-  -F "document_a_file=@trial/trial_boq.pdf" \
-  -F "document_b_label=IFC Specifications" \
-  -F "document_b_file=@trial/trial_specs.pdf"
+  -F "document_a_label=Tender BOQ + Specs" \
+  -F "document_a_files=@trial/trial_boq.pdf" \
+  -F "document_a_files=@trial/trial_specs.pdf" \
+  -F "document_b_label=IFC Drawings" \
+  -F "document_b_files=@trial/20240822-SED-B01-100%TD-Rev02.pdf"
 ```
 
 ## Project structure
 
 ```
 ConflictScan_RFI_automation/
-├── api.py                    # Flask API; owns all file reading (PDF/DOCX/XLSX/TXT)
+├── api.py                    # Flask API: accounts, projects, runs, result editing
+├── storage.py                # SQLite store: users, prefs, projects, runs, run files
+├── jobs.py                   # background scan queue, live progress, cancel
 ├── graph.py                  # LangGraph builder + run_conflict_scan()
-├── state.py                  # ConflictScanState, DocumentProfile, Discrepancy, RFIItem
+├── state.py                  # ConflictScanState, SourceFile, Discrepancy, RFIItem
 ├── edges.py                  # Conditional-edge routers
 │
+├── knowledge/
+│   ├── rfi_taxonomy.json     # issue classes, cues, non-issues, RFI house style
+│   └── corpus_stats/         # measured issue/discipline/attachment mix per corpus
+├── tools/
+│   └── analyze_rfi_log.py    # measure any project's RFI log against the taxonomy
+├── tests/                    # python -m pytest tests -q
+│
 ├── nodes/
-│   ├── input_processing.py   # receive_input: validate the pair, normalise labels
-│   ├── document_analysis.py  # chunking + per-document profiling
-│   ├── conflict_scan.py      # cross-document comparison -> discrepancy register
-│   ├── rfi_drafting.py       # discrepancy -> draft RFI -> filled .docx
+│   ├── input_processing.py   # receive_input: validate the two sets, normalise labels
+│   ├── file_ingest.py        # classify files, read text (OCR for scans), pair PDF+DXF
+│   ├── document_analysis.py  # chunked extraction per file, merged set profiles
+│   ├── drawing_analysis.py   # render / tile / vision-read drawings, DXF entities
+│   ├── conflict_scan.py      # alignment, pair/internal/interface/coverage review
+│   ├── rfi_knowledge.py      # loads the taxonomy, prompt fragments, classification
+│   ├── analysis_framework.py # multi-discipline categories, evaluation order
+│   ├── rfi_drafting.py       # group findings -> draft RFIs -> filled .docx
 │   ├── docx_template.py      # {{token}} substitution that survives Word run splits
 │   ├── export.py             # discrepancy register + RFI log (xlsx, CSV fallback)
-│   └── llm_client.py         # Ollama client
+│   ├── llm_client.py         # Ollama text client
+│   └── vision_client.py      # Ollama vision client + OCR
 │
-├── templates/index.html      # Web interface
+├── templates/index.html      # Web interface shell
+├── static/app.js, app.css    # Web interface (no build step)
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
-├── exports/                  # Generated registers and RFI documents
-└── uploads/                  # Transient upload scratch space
+├── data/                     # conflictscan.db + runs/<run>/inputs|exports (git-ignored)
+├── exports/                  # Outputs of the single-shot /scan endpoint
+└── uploads/                  # Per-scan scratch space (deleted after each scan)
 ```
 
 ## Outputs
 
 - `exports/<project>_conflict_scan_<timestamp>.xlsx` — two sheets:
-  *Discrepancy Register* and *RFI Log*. Falls back to CSV when pandas or
-  openpyxl are unavailable.
+  *Discrepancy Register* (issue class, scope, location, all sources quoted,
+  verify flag) and *RFI Log* (laid out like a project RFI log: subject,
+  description, block/area, attachments, points). Falls back to CSV when pandas
+  or openpyxl are unavailable.
 - `exports/<project>_RFI-00n_<subject>.docx` — one file per RFI.
 - `exports/RFI-00n_edited.docx` — written when an RFI is edited in the browser
   and regenerated, leaving the original draft intact.
+- `debug_logs/drawing_*.json` — everything the drawing reader extracted, per
+  drawing file.
+
+## Extending the knowledge base
+
+```bash
+python tools/analyze_rfi_log.py "<project RFI log>.xlsx" --rfi-folder "<folder of RFI sub-folders>" --out knowledge/corpus_stats/<project>.json --show-unclassified
+```
+
+A project with no central log can be read from each RFI's own form instead:
+
+```bash
+python tools/analyze_rfi_log.py --forms --rfi-folder "<folder of RFI folders>" --out knowledge/corpus_stats/<project>.json
+```
+
+The tool detects the log's header row (any log with a subject and a
+description column works) or the SUBJECT / INFORMATION REQUESTED parts of
+each form, classifies each RFI against the taxonomy, and
+reports the issue, discipline and attachment mix. Unclassified RFIs point to
+cues worth adding to `knowledge/rfi_taxonomy.json`. Keep new cues generic -
+describe the kind of problem, not one project's element names.
 
 ## Tuning
 
 | Setting | File | Default |
 |---|---|---|
 | Chunk size / overlap | `nodes/document_analysis.py` | 8,000 / 500 chars |
+| OCR pages per file | `CONFLICTSCAN_MAX_OCR_PAGES` | 30 |
+| Files per set | `CONFLICTSCAN_MAX_FILES_PER_SET` | 40 |
 | Pairs per LLM call | `nodes/conflict_scan.py` | 12 |
-| Keyword overlap to call two topics related | `nodes/conflict_scan.py` | 2 |
+| Internal-consistency pairs per set | `nodes/conflict_scan.py` | 48 |
+| Interface clusters reviewed | `nodes/conflict_scan.py` | 16 |
+| Similarity at which two findings merge | `nodes/conflict_scan.py` | 0.6 |
 | Quantity tolerance before a mismatch is raised | `nodes/conflict_scan.py` | 1% |
 | Cap on omission review | `nodes/conflict_scan.py` | 120 items |
-| RFIs per LLM call | `nodes/rfi_drafting.py` | 6 |
+| Points per RFI | `nodes/rfi_drafting.py` | 8 |
 | Response allowance quoted on the RFI | `nodes/rfi_drafting.py` | 7 days |
-| Model | `nodes/llm_client.py` | `qwen3:14b` |
 
 ## Degraded behaviour
 
@@ -191,20 +343,30 @@ Every stage fails soft, so a run always produces something reviewable:
 - An LLM chunk call that fails leaves that chunk empty and the run continues.
 - A document the LLM yields nothing for falls back to regex extraction of
   `key: value` lines, quantities, and standard references.
-- An RFI the model does not return is built from the discrepancy record itself.
+- A scanned page the OCR model cannot read is reported in the warnings.
+- An RFI (or a point) the model does not return is built from the finding itself.
 - Quantity mismatches never depend on the LLM at all.
 
 Warnings raised along the way are surfaced in the response and on screen.
 
 ## Troubleshooting
 
+**`ModuleNotFoundError: No module named 'langgraph'`** — the Python that runs
+`api.py` does not have the requirements installed. Install them into that
+interpreter (`python -m pip install -r requirements.txt`), or point
+`.claude/launch.json` / your shell at the venv that has them.
+
 **Port already in use (Windows)**
 ```cmd
 netstat -ano | findstr :5000
 ```
 
-**No text extracted from a PDF** — it is probably a scan with no text layer.
-The scan warns when a document yields no requirements or quantities.
+**OCR text looks wrong** — small local OCR models misread some Arabic. Findings
+resting on OCR text are tagged *verify*; check the quoted values against the
+scan, or install a stronger OCR model and set `CONFLICTSCAN_OCR_MODEL`.
+
+**A file was read as the wrong type** — set its type to *Document* or
+*Drawing* in the file list instead of *Auto*.
 
 **`{{placeholder}}` text appears in a generated RFI** — that token is not one
 the drafting node produces. Check it against the table in
@@ -212,7 +374,7 @@ the drafting node produces. Check it against the table in
 
 ---
 
-**Version**: 3.0.0
+**Version**: 4.0.0
 **Framework**: LangGraph
 **Backend**: Flask + Python 3.10+ + Ollama
 **Platform**: Windows compatible

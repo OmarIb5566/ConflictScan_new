@@ -1,0 +1,42 @@
+{
+  "rfi_count": 401,
+  "issue_class_share": {
+    "missing_information": 0.39,
+    "level_conflict": 0.21,
+    "cross_discipline_mismatch": 0.19,
+    "doc_value_conflict": 0.17,
+    "design_change": 0.14,
+    "submittal_conflict": 0.13,
+    "spatial_clash": 0.13,
+    "internal_inconsistency": 0.1,
+    "scope_gap_boq": 0.09,
+    "technical_compliance": 0.08,
+    "typical_unit_inconsistency": 0.06,
+    "site_condition": 0.06,
+    "contractor_proposal": 0.06,
+    "interface_tie_in": 0.02,
+    "spec_ambiguity": 0.0,
+    "product_availability": 0.0
+  },
+  "discipline_share": {
+    "general": 0.39,
+    "architectural": 0.25,
+    "civil_structural": 0.18,
+    "mechanical": 0.11,
+    "electrical": 0.08
+  },
+  "logged_attachments": {
+    "median": 3,
+    "max": 43,
+    "share_with_more_than_one": 0.71
+  },
+  "unclassified_count": 38,
+  "attachment_files": {
+    "rfi_folders": 403,
+    "median_files": 3,
+    "max_files": 43,
+    "share_with_more_than_one_file": 0.7,
+    "attachment_pdf_pages": 8931,
+    "share_pages_with_text_layer": 0.72
+  }
+}

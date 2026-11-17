@@ -6,3 +6,6 @@ exports/
 uploads/
 trial/
 graphify-out/
+data/
+RFI training data/
+debug_logs/

@@ -1,7 +1,10 @@
 """
 Document Analysis Node - ConflictScan / RFI Automation
 ======================================================
-Builds an independent, structured profile of EACH of the two input documents.
+Builds a structured profile of EACH of the two document sets: every file of a
+set is read and profiled on its own (scanned pages OCR-read via
+nodes/file_ingest.py, drawings via nodes/drawing_analysis.py), then merged
+into one set profile in which every item keeps the file it came from.
 
 Design principles
 -----------------
@@ -11,9 +14,11 @@ Design principles
 * Full coverage: every document is chunked and EVERY chunk is sent to the LLM.
   Relevant statements can sit on non-contiguous pages, so nothing is sampled
   or discarded.
-* Each document is profiled in isolation. Cross-document comparison happens
+* Text documents are profiled in isolation. Cross-document comparison happens
   later, in nodes/conflict_scan.py - keeping extraction free of any bias about
-  what the "other" document says.
+  what the "other" document says. The exception is a drawing: it is read
+  against a baseline checklist built from the other document (what to look
+  for, never the required values) - see nodes/drawing_analysis.py.
 
 LLM backend: Ollama via nodes/llm_client.py.
 """
@@ -317,22 +322,33 @@ def _build_sections(
 # ---------------------------------------------------------------------------
 
 _CHUNK_SYSTEM = """\
-You are a senior project document analyst. You are reading ONE CHUNK of a
-single project document. You do NOT know what other documents exist, and you
-must not speculate about them.
+You are a senior multi-discipline project document analyst (civil, structural,
+architectural, mechanical, electrical, contracts). You are reading ONE CHUNK of
+a single project document - a BOQ, specification, schedule, report, letter or
+instruction. You do NOT know what other documents exist, and you must not
+speculate about them.
 
 Your job is to record, faithfully and literally, what THIS chunk asserts.
+
+The document may be bilingual (Arabic and English) and may have been
+transcribed from a scan by OCR. Read both languages. Write "topic" and
+"statement" in English; copy values, item numbers, codes and references
+exactly as written (Arabic item numbers included).
 
 Return a JSON object with exactly these keys:
 
 {
   "requirements": [
     {
-      "topic": "<short subject, e.g. 'Concrete grade - columns'>",
+      "topic": "<short subject, e.g. 'Lighting pole - height'>",
       "statement": "<what the document requires or states, in its own terms>",
-      "value": "<the specific value/grade/rating/date if one is given, else null>",
-      "reference": "<clause, section, item code, sheet or page shown in the text, else null>",
-      "discipline": "<civil|structural|architectural|mechanical|electrical|plumbing|contractual|general>"
+      "quote": "<the exact words in this chunk that state it, copied character for character, at most 40 words>",
+      "value": "<the specific value/rating/size/type/date if one is given, else null>",
+      "reference": "<clause / section / BOQ item no. / sheet, plus 'p. N' from the nearest preceding [Page N] marker, else null>",
+      "discipline": "<civil|structural|architectural|mechanical|electrical|plumbing|contractual|general>",
+      "element_id": "<tag, mark or name identifying the element or system (equipment tag, panel, room, member mark), else null>",
+      "location": "<building / block / zone / floor / room the statement applies to, as written, else null>",
+      "open_item": <true when the document itself leaves this open: TBD, to be confirmed, by others, hold, refer to another package, blank quantity - else false>
     }
   ],
   "quantities": [
@@ -340,21 +356,63 @@ Return a JSON object with exactly these keys:
       "description": "<what is being measured or priced>",
       "amount": <number or null>,
       "unit": "<unit string or null>",
-      "reference": "<item code / section, else null>"
+      "reference": "<item code / section, plus 'p. N', else null>",
+      "location": "<building / zone the quantity applies to, else null>"
     }
   ],
-  "standards": ["<ASTM / BS / EN / ISO / ECP reference exactly as written>"],
+  "standards": ["<ASTM / BS / EN / ISO / NFPA / ECP / utility-company reference exactly as written>"],
   "entities": ["<named element, system, zone, building or party>"],
-  "notes": "<anything structurally important about this chunk>"
+  "notes": "<anything important about this chunk>"
 }
 
 Rules:
 - Return ONLY a valid JSON object. No markdown fences, no preamble.
 - Use [] or null for anything absent from this chunk.
 - Never invent, infer, or normalise values. Quote what is written.
+- A BOQ line is one requirement (its full description as the statement, its
+  item number as the reference) plus one quantity entry.
 - Preserve every clause/section/item reference you see - later stages depend
   on being able to cite exactly where a statement came from.
 """
+
+
+MAX_QUOTE_CHARS = 300
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def verbatim_quote(req: Dict[str, Any], source_text: str) -> str:
+    """
+    The document's own words for a statement, guaranteed to occur in the source.
+
+    The model's "quote" is kept only when it really appears in the chunk
+    (whitespace-insensitive). Otherwise the source line that best matches the
+    statement - and contains its value, when there is one - is used. '' when
+    nothing in the source supports the statement.
+    """
+    source = _squash(source_text)
+    if not source:
+        return ""
+    quote = _squash(req.get("quote"))
+    if quote and len(quote) >= 4 and quote.lower() in source.lower():
+        start = source.lower().index(quote.lower())
+        return source[start:start + len(quote)][:MAX_QUOTE_CHARS]
+
+    value = _squash(req.get("value")).lower()
+    want = set(re.findall(r"[a-z0-9]{3,}", f"{req.get('topic')} {req.get('statement')} {value}".lower()))
+    best, best_score = "", 0
+    for line in re.split(r"\n|(?<=[.;])\s+", str(source_text)):
+        line = _squash(line)
+        if len(line) < 4 or re.fullmatch(r"\[Page \d+\]", line):
+            continue
+        if value and value not in line.lower():
+            continue
+        score = len(want & set(re.findall(r"[a-z0-9]{3,}", line.lower())))
+        if score > best_score:
+            best, best_score = line, score
+    return best[:MAX_QUOTE_CHARS] if best_score >= 2 or (value and best) else ""
 
 
 def _extract_chunk(chunk: Dict[str, Any], doc_label: str) -> Dict[str, Any]:
@@ -374,8 +432,11 @@ def _extract_chunk(chunk: Dict[str, Any], doc_label: str) -> Dict[str, Any]:
             user=user_prompt,
             temperature=0.1,
         )
+        requirements = [r for r in (result.get("requirements") or []) if isinstance(r, dict)]
+        for req in requirements:
+            req["quote"] = verbatim_quote(req, chunk["text"])
         return {
-            "requirements": result.get("requirements") or [],
+            "requirements": requirements,
             "quantities":   result.get("quantities") or [],
             "standards":    result.get("standards") or [],
             "entities":     result.get("entities") or [],
@@ -428,10 +489,9 @@ def _merge_chunk_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                 continue
             if key in seen_reqs:
                 existing = requirements[seen_reqs[key]]
-                if req.get("value") and not existing.get("value"):
-                    existing["value"] = req["value"]
-                if req.get("reference") and not existing.get("reference"):
-                    existing["reference"] = req["reference"]
+                for field in ("value", "reference", "element_id", "location", "grid", "section_ref", "quote"):
+                    if req.get(field) and not existing.get(field):
+                        existing[field] = req[field]
             else:
                 seen_reqs[key] = len(requirements)
                 requirements.append(dict(req))
@@ -657,6 +717,157 @@ def build_document_profile(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Document sets - every file on a side is profiled on its own, then merged
+# into one set profile. Text documents go through the chunking pipeline
+# above; drawings are rendered/tiled/vision-read (nodes/drawing_analysis.py).
+# Both return the same profile shape, and every statement keeps the file it
+# came from, so a finding can cite "file | sheet/page | clause" across a set
+# of many attachments.
+# ---------------------------------------------------------------------------
+
+_PAGE_REF = re.compile(r"\bp(?:age)?\.?\s*(\d+)\b", re.IGNORECASE)
+
+
+def _tag_items(profile: Dict[str, Any], slot: str, file_name: str, file_index: int) -> None:
+    """Stamp every item with its side, source file and a stable id (baseline links use it)."""
+    for i, req in enumerate(profile.get("requirements") or []):
+        req.setdefault("source_file", file_name)
+        req["side"] = slot
+        req.setdefault("uid", f"{slot}:{file_index}:r{i}")
+    for i, qty in enumerate(profile.get("quantities") or []):
+        qty.setdefault("source_file", file_name)
+        qty["side"] = slot
+        qty.setdefault("uid", f"{slot}:{file_index}:q{i}")
+
+
+def _mark_ocr_items(profile: Dict[str, Any], ocr_pages: List[int], total_pages: int) -> None:
+    """Items read from OCR'd pages are flagged low-confidence - quoted values may carry OCR errors."""
+    if not ocr_pages:
+        return
+    ocr = set(ocr_pages)
+    mostly_ocr = total_pages and len(ocr) >= total_pages / 2
+    for item in (profile.get("requirements") or []) + (profile.get("quantities") or []):
+        m = _PAGE_REF.search(str(item.get("reference") or ""))
+        if (m and int(m.group(1)) in ocr) or (not m and mostly_ocr):
+            item["low_confidence"] = True
+            item["text_source"] = "ocr"
+
+
+def _profile_text_file(entry: Dict[str, Any], slot: str, label: str, review_focus: str):
+    name = entry.get("name") or "document"
+    ocr_pages: List[int] = []
+    pages = 0
+    file_warnings: List[str] = []
+    if entry.get("kind") == "text":
+        text = entry.get("text") or ""
+    else:
+        from nodes.file_ingest import read_document
+        doc = read_document(entry["path"])
+        text, ocr_pages, pages, file_warnings = doc["text"], doc["ocr_pages"], doc["pages"], doc["warnings"]
+
+    profile = build_document_profile(text, label, slot, name, review_focus)
+    _mark_ocr_items(profile, ocr_pages, pages)
+    summary = {
+        "name": name,
+        "kind": "text" if entry.get("kind") == "text" else "document",
+        "classified_as": entry.get("classified_as", ""),
+        "role": entry.get("role", ""),
+        "chars": profile["char_count"],
+        "chunks": profile["chunk_count"],
+        "total_chunks": profile["total_chunk_count"],
+        "focus_status": profile["focus_status"],
+        "pages": pages,
+        "ocr_pages": len(ocr_pages),
+        "requirements": len(profile["requirements"]),
+        "quantities": len(profile["quantities"]),
+        "warnings": file_warnings,
+    }
+    return profile, summary
+
+
+def _profile_drawing_file(entry: Dict[str, Any], slot: str, label: str, review_focus: str,
+                          baseline: Optional[Dict[str, Any]]):
+    from nodes.drawing_analysis import build_drawing_profile
+
+    name = entry.get("name") or "drawing"
+    profile = build_drawing_profile(
+        entry.get("path"), entry.get("dxf_path"), label, slot, name, review_focus, baseline,
+    )
+    summary = {
+        "name": name,
+        "kind": "drawing",
+        "classified_as": entry.get("classified_as", ""),
+        "role": entry.get("role", ""),
+        "sheets": len(profile.get("sheets") or []),
+        "tiles": profile.get("chunk_count", 0),
+        "requirements": len(profile.get("requirements") or []),
+        "quantities": len(profile.get("quantities") or []),
+        "warnings": list(profile.get("warnings") or []),
+    }
+    return profile, summary
+
+
+def _merge_set(slot: str, label: str, parts: List[Dict[str, Any]], summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Concatenate per-file profiles into one set profile (items keep their source_file)."""
+    requirements: List[Dict[str, Any]] = []
+    quantities: List[Dict[str, Any]] = []
+    standards: List[str] = []
+    entities: List[str] = []
+    notes: List[str] = []
+    for part in parts:
+        requirements.extend(part.get("requirements") or [])
+        quantities.extend(part.get("quantities") or [])
+        for std in part.get("standards") or []:
+            if std and std not in standards:
+                standards.append(std)
+        for ent in part.get("entities") or []:
+            if ent and ent not in entities:
+                entities.append(ent)
+        if part.get("internal_notes"):
+            notes.append(f"[{part.get('source_name')}] {part['internal_notes']}")
+
+    statuses = [p.get("focus_status") for p in parts if not p.get("drawing_inputs")]
+    focus_status = "sectioned" if "sectioned" in statuses else next((s for s in statuses if s != "no_focus"), "no_focus")
+
+    merged: Dict[str, Any] = {
+        "slot": slot,
+        "label": label,
+        "source_name": " + ".join(str(p.get("source_name") or "") for p in parts),
+        "char_count": sum(p.get("char_count", 0) for p in parts),
+        "chunk_count": sum(p.get("chunk_count", 0) for p in parts),
+        "total_chunk_count": sum(p.get("total_chunk_count", 0) for p in parts),
+        "focus_status": focus_status,
+        "requirements": requirements,
+        "quantities": quantities,
+        "standards": standards,
+        "entities": entities,
+        "internal_notes": " | ".join(notes),
+        "files": summaries,
+    }
+
+    drawings = [p for p in parts if p.get("drawing_inputs")]
+    if drawings:
+        merged.update({
+            "drawing_inputs": {
+                "pdf": any(p["drawing_inputs"].get("pdf") for p in drawings),
+                "dxf": any(p["drawing_inputs"].get("dxf") for p in drawings),
+                "visual_source": drawings[0]["drawing_inputs"].get("visual_source"),
+                "drawing_files": len(drawings),
+            },
+            "sheets": [
+                {**sheet, "file": p.get("source_name")} for p in drawings for sheet in (p.get("sheets") or [])
+            ],
+            "baseline": next((p.get("baseline") for p in drawings if p.get("baseline")), None),
+            "baseline_coverage": [c for p in drawings for c in (p.get("baseline_coverage") or [])],
+            "dxf_summary": next((p.get("dxf_summary") for p in drawings if p.get("dxf_summary")), None),
+            "warnings": [w for p in drawings for w in (p.get("warnings") or [])],
+        })
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # LangGraph node
 # ---------------------------------------------------------------------------
@@ -667,89 +878,117 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
 
     Consumes
     --------
-    document_a_text / document_a_label / document_a_source
-    document_b_text / document_b_label / document_b_source
+    document_a_files / document_b_files : the two sets (see state.SourceFile)
+    document_a_label / document_b_label, review_focus
+
+    Order
+    -----
+    1. Every text document of both sets is read (OCR for scanned pages) and
+       profiled independently.
+    2. Drawings are read next, each set's drawings against ONE baseline built
+       from the other set's text documents - or, when the other set is
+       drawings only and was already read, from that set.
 
     Produces
     --------
-    profile_a, profile_b   : independent structured profiles
+    profile_a, profile_b   : merged set profiles; every item carries its source_file
     documents_analyzed     : True
-    analysis_warnings      : appended when a document is empty or thin
+    analysis_warnings      : unreadable files, OCR use, thin extraction, focus narrowing
     step_history           : one entry
     """
-    print("\n[analyze_documents] === Profiling both documents ===")
+    print("\n[analyze_documents] === Profiling both document sets ===")
 
-    label_a = state.get("document_a_label") or "Document A"
-    label_b = state.get("document_b_label") or "Document B"
+    labels = {"a": state.get("document_a_label") or "Document A", "b": state.get("document_b_label") or "Document B"}
     review_focus = (state.get("review_focus") or "").strip()
+    files = {slot: list(state.get(f"document_{slot}_files") or []) for slot in ("a", "b")}
 
-    profile_a = build_document_profile(
-        state.get("document_a_text") or "",
-        label_a,
-        "a",
-        state.get("document_a_source") or "pasted text",
-        review_focus,
-    )
-    profile_b = build_document_profile(
-        state.get("document_b_text") or "",
-        label_b,
-        "b",
-        state.get("document_b_source") or "pasted text",
-        review_focus,
-    )
+    parts: Dict[str, List[Dict[str, Any]]] = {"a": [], "b": []}
+    summaries: Dict[str, List[Dict[str, Any]]] = {"a": [], "b": []}
+
+    # 1. Text documents (and pasted text) of both sets
+    for slot in ("a", "b"):
+        for idx, entry in enumerate(files[slot]):
+            if entry.get("kind") == "drawing":
+                continue
+            print(f"[analyze_documents] '{labels[slot]}' file {idx + 1}/{len(files[slot])}: {entry.get('name')} (document)")
+            profile, summary = _profile_text_file(entry, slot, labels[slot], review_focus)
+            _tag_items(profile, slot, entry.get("name") or "document", idx)
+            parts[slot].append(profile)
+            summaries[slot].append(summary)
+
+    text_profiles = {slot: _merge_set(slot, labels[slot], parts[slot], summaries[slot]) for slot in ("a", "b")}
+    final: Dict[str, Dict[str, Any]] = {}
+
+    # 2. Drawings, each set against a baseline from the other
+    for slot in ("a", "b"):
+        other = "b" if slot == "a" else "a"
+        drawing_entries = [(i, e) for i, e in enumerate(files[slot]) if e.get("kind") == "drawing"]
+        baseline = None
+        if drawing_entries:
+            reference = text_profiles[other] if text_profiles[other]["requirements"] else final.get(other)
+            if reference and (reference.get("requirements") or reference.get("quantities")):
+                from nodes.drawing_analysis import build_baseline_set
+                baseline = build_baseline_set(reference, other, review_focus)
+        for idx, entry in drawing_entries:
+            print(f"[analyze_documents] '{labels[slot]}' file {idx + 1}/{len(files[slot])}: {entry.get('name')} (drawing)")
+            profile, summary = _profile_drawing_file(entry, slot, labels[slot], review_focus, baseline)
+            _tag_items(profile, slot, entry.get("name") or "drawing", idx)
+            parts[slot].append(profile)
+            summaries[slot].append(summary)
+        final[slot] = _merge_set(slot, labels[slot], parts[slot], summaries[slot])
+
+    profile_a, profile_b = final["a"], final["b"]
 
     warnings: List[str] = []
     for prof in (profile_a, profile_b):
-        if prof["char_count"] == 0:
-            warnings.append(
-                f"'{prof['label']}' contained no readable text - nothing could be compared against it."
-            )
-        elif not prof["requirements"] and not prof["quantities"]:
-            warnings.append(
-                f"No requirements or quantities could be extracted from '{prof['label']}'. "
-                f"The file may be a scanned image without a text layer."
-            )
+        label = prof["label"]
+        for summary in prof.get("files") or []:
+            warnings.extend(summary.get("warnings") or [])
+            name = summary["name"]
+            if summary["kind"] == "drawing":
+                continue
+            if summary["chars"] == 0:
+                warnings.append(f"'{label}' / '{name}' contained no readable text - nothing could be compared against it.")
+            elif not summary["requirements"] and not summary["quantities"]:
+                warnings.append(
+                    f"No requirements or quantities could be extracted from '{label}' / '{name}'."
+                )
+            status = summary.get("focus_status")
+            if status == "sectioned":
+                warnings.append(
+                    f"Review focus '{review_focus}' narrowed '{label}' / '{name}' to "
+                    f"{summary['chunks']}/{summary['total_chunks']} chunk(s) before analysis. "
+                    f"Content outside these sections was not scanned."
+                )
+            elif status == "no_headings_found":
+                warnings.append(
+                    f"Review focus '{review_focus}' requested for '{label}' / '{name}', but no clear "
+                    f"section structure was detected - the full document was scanned instead."
+                )
+            elif status == "no_relevant_headings":
+                warnings.append(
+                    f"Review focus '{review_focus}' matched no sections in '{label}' / '{name}' - "
+                    f"the full document was scanned instead."
+                )
+            elif status == "selection_failed":
+                warnings.append(
+                    f"Could not evaluate section relevance for '{label}' / '{name}' (LLM error) - "
+                    f"the full document was scanned instead."
+                )
 
-        status = prof.get("focus_status")
-        if status == "sectioned":
-            warnings.append(
-                f"Review focus '{review_focus}' narrowed '{prof['label']}' to "
-                f"{prof['chunk_count']}/{prof['total_chunk_count']} chunk(s) before analysis. "
-                f"Content outside these sections was not scanned."
-            )
-        elif status == "no_headings_found":
-            warnings.append(
-                f"Review focus '{review_focus}' requested for '{prof['label']}', but no clear "
-                f"section structure was detected - the full document was scanned instead."
-            )
-        elif status == "no_relevant_headings":
-            warnings.append(
-                f"Review focus '{review_focus}' matched no sections in '{prof['label']}' - "
-                f"the full document was scanned instead."
-            )
-        elif status == "selection_failed":
-            warnings.append(
-                f"Could not evaluate section relevance for '{prof['label']}' (LLM error) - "
-                f"the full document was scanned instead."
-            )
-
-    print(
-        f"[analyze_documents] '{label_a}': {len(profile_a['requirements'])} requirements, "
-        f"{len(profile_a['quantities'])} quantities, {len(profile_a['standards'])} standards"
-    )
-    print(
-        f"[analyze_documents] '{label_b}': {len(profile_b['requirements'])} requirements, "
-        f"{len(profile_b['quantities'])} quantities, {len(profile_b['standards'])} standards"
-    )
+    for prof in (profile_a, profile_b):
+        print(
+            f"[analyze_documents] '{prof['label']}': {len(prof.get('files') or [])} file(s), "
+            f"{len(prof['requirements'])} requirements, {len(prof['quantities'])} quantities, "
+            f"{len(prof['standards'])} standards"
+        )
     print("[analyze_documents] === Profiling complete ===\n")
 
+    describe = lambda p: f"'{p['label']}' {len(p.get('files') or [])} file(s), {p['chunk_count']} chunk(s)/tile(s)"
     return {
         "profile_a": profile_a,
         "profile_b": profile_b,
         "documents_analyzed": True,
         "analysis_warnings": warnings,
-        "step_history": [
-            f"analyze_documents: '{label_a}' {profile_a['chunk_count']} chunk(s), "
-            f"'{label_b}' {profile_b['chunk_count']} chunk(s)"
-        ],
+        "step_history": [f"analyze_documents: {describe(profile_a)}; {describe(profile_b)}"],
     }

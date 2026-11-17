@@ -1,10 +1,23 @@
+import os
 import requests
 import json
 import time
 import re
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "gemma4:e4b"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+MODEL_NAME = os.environ.get("CONFLICTSCAN_TEXT_MODEL", "gemma4:e4b")
+
+# Ollama falls back to a small default context window when none is requested
+# and silently drops the START of an over-long prompt - i.e. the system
+# instructions. Every call asks for an explicit window large enough for the
+# longest prompt this pipeline builds.
+NUM_CTX = int(os.environ.get("CONFLICTSCAN_NUM_CTX", "16384"))
+NUM_PREDICT = int(os.environ.get("CONFLICTSCAN_NUM_PREDICT", "8192"))
+
+
+def ollama_options(temperature: float, **extra) -> dict:
+    return {"temperature": temperature, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX, **extra}
+
 
 class OllamaLLM:
     def __init__(self, model: str = MODEL_NAME, url: str = OLLAMA_URL):
@@ -20,10 +33,7 @@ class OllamaLLM:
             ],
             "stream": False,
             "format": "json",  # Force JSON format
-            "options": {
-                "temperature": temperature,
-                "num_predict": 8192  # Increased token limit
-            }
+            "options": ollama_options(temperature),
         }
 
         for attempt in range(max_retries + 1):
@@ -32,7 +42,7 @@ class OllamaLLM:
                     wait_time = 5 * attempt
                     print(f"[llm] Retry {attempt}/{max_retries} after {wait_time}s...")
                     time.sleep(wait_time)
-                
+
                 print(f"[llm] Calling LLM...")
                 response = requests.post(
                     self.url,
@@ -43,41 +53,41 @@ class OllamaLLM:
 
                 response.raise_for_status()
                 resp_json = response.json()
-                
+
                 # Debug print
                 print(f"[llm] Raw response keys: {resp_json.keys()}")
-                
+
                 content = resp_json.get("message", {}).get("content", "")
-                
+
                 if not content or len(content) == 0:
                     print(f"[llm] Empty response from LLM")
                     print(f"Full response: {resp_json}")
                     raise ValueError("LLM returned empty content")
-                
+
                 print(f"[llm] LLM responded ({len(content)} chars)")
-                
+
                 # Try to parse JSON
                 parsed = self._extract_json(content)
                 print(f"[llm] JSON parsed successfully")
                 return parsed
-                
+
             except Exception as e:
                 print(f"[llm] Error (attempt {attempt + 1}): {str(e)[:200]}")
                 if attempt == max_retries:
                     raise Exception(f"LLM failed after {max_retries} retries: {e}")
-        
+
         raise Exception("LLM max retries exceeded")
 
     def _extract_json(self, text: str) -> dict:
         """Extract JSON from LLM response - handles partial/malformed JSON"""
         text = text.strip()
-        
+
         # Try direct parse
         try:
             return json.loads(text)
         except:
             pass
-        
+
         # Extract from markdown
         if '```json' in text or '```' in text:
             pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
@@ -87,7 +97,7 @@ class OllamaLLM:
                     return json.loads(matches[0])
                 except:
                     pass
-        
+
         # Find first complete JSON object
         brace_start = text.find('{')
         if brace_start != -1:
@@ -109,7 +119,7 @@ class OllamaLLM:
                                 return json.loads(json_str)
                             except:
                                 pass
-        
+
         # Last resort: an empty object. Callers read the keys they expect with
         # .get() and fall back on their own, so an empty dict degrades cleanly
         # whatever the caller asked for.
@@ -124,14 +134,14 @@ class OllamaLLM:
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 print(f"[llm] Available models: {[m['name'] for m in models]}")
-                
+
                 # Check if our model exists
                 model_exists = any(self.model in m['name'] for m in models)
                 if not model_exists:
                     print(f"[llm] Model {self.model} not found!")
                     print(f"[llm] Pull it with: ollama pull {self.model}")
                     return False
-                
+
                 print(f"[llm] Ollama is running, {self.model} is available")
                 return True
             return False
