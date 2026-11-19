@@ -751,7 +751,7 @@ table.list td.actions { width: 1%; white-space: nowrap; text-align: right; }
 .files { list-style: none; padding: 0; margin: 12px 0 0; }
 .files li {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto;
   gap: 8px;
   align-items: center;
   padding: 7px 8px 7px 10px;
@@ -993,3 +993,20 @@ details > summary:hover { color: var(--ink); }
 .second-opinion { font-size: 13px; padding: 8px 10px; border-radius: 8px; background: var(--ok-soft); }
 .second-opinion.disputed { background: var(--warn-soft); }
 table.list.compact td, table.list.compact th { padding: 6px 10px; }
+
+/* ------------------------------------------------------------ revisions */
+.file-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.file-chips:empty { display: none; }
+.chip { font-size: 10.5px; padding: 1px 6px; border-radius: 999px; background: var(--surface-3); color: var(--ink-soft); white-space: nowrap; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.chg-new { background: var(--accent-soft); color: var(--accent); }
+.badge.chg-changed { background: var(--warn-soft); color: var(--warn); }
+.banner.changes { margin-bottom: 12px; }
+.resolved-list { margin: 0 0 12px; }
+.cmp-h { margin: 14px 0 6px; font-size: 14px; }
+.cmp-h.new { color: var(--accent); } .cmp-h.changed { color: var(--warn); } .cmp-h.resolved { color: var(--ok); }
+.cmp-list { list-style: none; padding: 0; margin: 0; }
+.cmp-list li { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.prev-text { margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; }
+.prev-val { white-space: pre-wrap; font-size: 13px; color: var(--ink-soft); margin-bottom: 8px; }

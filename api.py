@@ -134,6 +134,13 @@ def _not_found(exc):
     return exc
 
 
+@app.errorhandler(400)
+def _bad_request(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": getattr(exc, "description", None) or "Bad request."}), 400
+    return exc
+
+
 @app.errorhandler(403)
 def _forbidden(exc):
     return jsonify({"error": getattr(exc, "description", None) or "You do not have permission to do this."}), 403
@@ -327,7 +334,8 @@ def _file_payload(f):
         "detected_kind": f.get("detected_kind"), "detected_reason": f.get("detected_reason"),
         "size": f["size"], "created_at": f["created_at"],
         "pages": f.get("pages"), "problem": f.get("problem"), "inspecting": not f.get("inspected_at"),
-        "sha256": f.get("sha256"),
+        "sha256": f.get("sha256"), "lineage_id": f.get("lineage_id"), "supersedes": f.get("supersedes"),
+        "duplicate_of": f.get("duplicate_of"), "unchanged_since_parent": f.get("unchanged_since_parent"),
     }
 
 
@@ -348,7 +356,13 @@ def _run_payload(run, project=None, full=True):
         out["inputs"] = run.get("inputs") or {}
         out["results"] = run.get("results")
         out["review"] = run.get("review") or {}
-        out["files"] = [_file_payload(f) for f in storage.list_run_files(run["id"])]
+        files = storage.list_run_files(run["id"])
+        try:
+            import revisions
+            revisions.annotate_files(run, files)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[api] could not annotate files: {exc}")
+        out["files"] = [_file_payload(f) for f in files]
     return out
 
 
@@ -360,8 +374,14 @@ def _default_inputs(project):
         inputs = dict(prev.get("inputs") or {})
         inputs.pop("document_a_text", None)
         inputs.pop("document_b_text", None)
-        return inputs
+        inputs.pop("_rev", None)
     settings = project.get("settings") or {}
+    if runs:
+        # project defaults fill any header field the previous revision left empty
+        meta = dict(settings.get("rfi_form_meta") or {})
+        meta.update({k: v for k, v in (inputs.get("rfi_form_meta") or {}).items() if v})
+        inputs["rfi_form_meta"] = meta
+        return inputs
     return {"rfi_grouping": settings.get("rfi_grouping") or "consolidated",
             "document_a_label": settings.get("set_a_label") or "",
             "document_b_label": settings.get("set_b_label") or "",
@@ -1226,7 +1246,7 @@ admin_api.register(app)
 def register_extensions():
     """Optional modules (RFI log, collaboration, fleet admin...) - each adds its routes and hooks."""
     import importlib
-    for name in ("project_settings", "rfi_log", "collab", "fleet_api"):
+    for name in ("project_settings", "revisions", "rfi_log", "collab", "fleet_api"):
         try:
             mod = importlib.import_module(name)
         except ModuleNotFoundError as exc:

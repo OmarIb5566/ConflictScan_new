@@ -220,6 +220,33 @@ and the problem, followed by one line per source with its reference and its
 words in quotation marks, then one question per point. **Every RFI field is editable**. Edits save as you type. Click *Regenerate Word
 document* to write the revised RFI into that run's own exports folder.
 
+## Working over revisions
+
+- **Re-scans.** *Edit & re-run* makes a new revision that links the same
+  stored files, so nothing is uploaded twice. Unchanged files show
+  *unchanged · reused*, and their model readings come from the response
+  cache.
+- **Replacing a file.** The ⟳ button on a file uploads its new version (for
+  example drawing Rev B for Rev A). It keeps the set and position, and the
+  project's *Documents* section shows every version and which revisions used
+  it.
+- **Carry-forward.** When a revision finishes, its findings are matched with
+  the revision it came from:
+  - Your triage, notes and severity changes follow each finding.
+  - A finding that changed is re-opened.
+  - RFIs covering the same findings keep their number and, when nothing
+    changed, your edited text.
+  - New findings get new RFI numbers.
+  - Findings that disappeared are listed as *resolved*.
+- **Comparing revisions.** *Compare…* on the Findings step shows any two
+  revisions side by side: new, changed, resolved and unchanged.
+- **Duplicates.** A file uploaded twice (same content) is flagged.
+- **Project settings** (managers):
+  - RFI header defaults, default set names, drafting style and response time.
+  - House RFI numbering (`{code}-RFI-{disc}-{seq:04d}`, with the next number).
+  - The project's own RFI form (.docx), with a preview of every `{{token}}`
+    and a filled sample to download.
+
 ## AI fleet: several local models, each on the job it does best
 
 Every model call goes through `fleet/`. A **profile** in `config/fleet.toml`
@@ -423,6 +450,8 @@ ConflictScan_RFI_automation/
 ├── adapters/                 # identity (local/LDAP), files (local/share/S3), reference data, model servers
 ├── fleet/                    # AI fleet: roles/profiles, client (cache, log, fallback), verify, memory, corpus
 ├── fleet_api.py              # admin console: AI fleet
+├── revisions.py              # carry-forward, revision comparison, file supersession/history
+├── project_settings.py       # project settings, house numbering, the project's RFI form
 ├── bench/run.py              # accuracy/speed benchmark on real past RFIs
 ├── config/fleet.toml         # role -> model profiles (baseline / workstation / a100)
 ├── jobs.py                   # database job queue, workers, live progress, retries, upload checks
@@ -461,6 +490,7 @@ ConflictScan_RFI_automation/
 ├── templates/index.html      # Web interface shell
 ├── static/app.js, app.css    # Web interface (no build step)
 ├── static/admin.js           # admin console
+├── static/project_extras.js  # project settings dialog, document history
 ├── config/reference_data.json  # local stand-in for the company project register
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
 └── data/                     # conflictscan.db, runs/<run>/inputs|exports|debug, scratch/ (git-ignored)

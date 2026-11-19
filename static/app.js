@@ -1955,13 +1955,18 @@ class RunView {
         <span class="ext">${esc(ext || "file")}</span>
         <div class="fn"><a href="/api/runs/${esc(this.id)}/files/${esc(f.id)}/download" title="Download ${esc(f.name)}">${esc(f.name)}</a>
           <div class="sub" title="${esc(f.detected_reason || "")}">${facts.join(" &middot; ")}</div>
-          ${f.problem ? `<div class="file-problem" role="alert">&#9888; This file ${esc(f.problem)}. Remove it to scan.</div>` : ""}</div>
+          ${f.problem ? `<div class="file-problem" role="alert">&#9888; This file ${esc(f.problem)}. Remove it to scan.</div>` : ""}
+          <div class="file-chips">${f.supersedes ? `<span class="chip" title="New version of ${esc(f.supersedes)}">replaces ${esc(f.supersedes)}</span>` : ""}
+            ${f.unchanged_since_parent ? `<span class="chip ok" title="Same file as in the revision this one was made from - its reading is reused from the cache">unchanged &middot; reused</span>` : ""}
+            ${f.unchanged_since_parent === false ? `<span class="chip warn" title="Different from the previous revision">changed</span>` : ""}
+            ${(f.duplicate_of || []).map((d) => `<span class="chip warn" title="Identical content">same as ${esc(d.name)} (Set ${esc(d.slot.toUpperCase())})</span>`).join("")}</div></div>
         <span class="kind-wrap"><select data-kind="${esc(f.id)}" ${locked ? "disabled" : ""} aria-label="How to read this file">
           <option value="auto" ${f.kind === "auto" ? "selected" : ""}>Auto${esc(guess)}</option>
           <option value="document" ${f.kind === "document" ? "selected" : ""} ${DRAWING_ONLY.includes(ext) ? "disabled" : ""}>Document</option>
           <option value="drawing" ${f.kind === "drawing" ? "selected" : ""} ${DOCUMENT_ONLY.includes(ext) ? "disabled" : ""}>Drawing</option>
         </select></span>
-        ${locked ? "<span></span><span></span>" : `<button class="icon-btn sm" data-move="${esc(f.id)}" title="Move to Set ${other}">&#8644;</button>
+        ${locked ? "<span></span><span></span><span></span>" : `<button class="icon-btn sm" data-replace="${esc(f.id)}" title="Replace with a new version (keeps its place and history)">&#10227;</button>
+        <button class="icon-btn sm" data-move="${esc(f.id)}" title="Move to Set ${other}">&#8644;</button>
         <button class="icon-btn sm" data-remove="${esc(f.id)}" title="Remove file">&times;</button>`}
       </li>`;
     }).join("") + (files.length ? "" : `<li style="display:block;text-align:center" class="muted small">No files in this set yet.</li>`);
@@ -2008,6 +2013,54 @@ class RunView {
     placeholder.remove();
     this.renderFiles(slot);
     this.renderStepper();
+  }
+
+  replaceFile(fileId) {
+    const old = this.run.files.find((f) => f.id === fileId);
+    const input = el(`<input type="file" accept="${ACCEPT}" hidden>`);
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      input.remove();
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const f = await uploadFiles(`/api/runs/${this.id}/files/${fileId}/replace`, fd, () => {});
+        const i = this.run.files.findIndex((x) => x.id === fileId);
+        this.run.files.splice(i, 1, f);
+        this.renderFiles(f.slot);
+        toast(`${old.name} replaced by ${f.name} - the earlier version stays in the previous revisions`, { type: "success" });
+      } catch (err) { toastError(err); }
+    });
+    input.click();
+  }
+
+  async compareDialog() {
+    const siblings = ((App.projectIndex.get(this.run.project_id) || {}).runs || []).filter((r) => r.id !== this.id && r.status === "complete");
+    if (!siblings.length) { toast("There is no other completed revision to compare with."); return; }
+    const pick = (this.results().changes || {}).base_run_id || siblings[0].id;
+    const render = async (b, baseId) => {
+      const box = $("[data-cmp]", b);
+      box.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const c = await api(`/api/runs/${this.id}/compare?base=${encodeURIComponent(baseId)}`);
+        const group = (title, rows, cls, extra) => `<h4 class="cmp-h ${cls}">${title} <span class="muted">(${rows.length})</span></h4>` + (rows.length
+          ? `<ul class="cmp-list">${rows.map((x) => `<li><span class="mono small">${esc(x.id)}</span> <span class="badge sev-${esc(x.severity || "minor")}">${esc(x.severity || "")}</span>
+            ${esc(x.topic)}${x.location ? ` <span class="muted">&middot; ${esc(x.location)}</span>` : ""}${extra ? extra(x) : ""}</li>`).join("")}</ul>` : `<p class="muted small">None.</p>`);
+        box.innerHTML = group(`New in Rev ${c.seq}`, c.new, "new")
+          + group("Changed", c.changed, "changed", (x) => ` <span class="small" style="color:var(--warn)">${esc((x.what || []).join("; "))}</span>`)
+          + group(`Resolved since Rev ${c.base_seq}`, c.resolved, "resolved", (x) => ` <span class="muted small">(was ${esc(x.prev_status)})</span>`)
+          + group("Still there, unchanged", c.unchanged, "same", (x) => ` <span class="muted small">(${esc(x.prev_status)} in Rev ${c.base_seq})</span>`);
+      } catch (err) { box.innerHTML = `<div class="banner warn">${esc(err.message)}</div>`; }
+    };
+    modal({
+      title: `Compare Rev ${this.run.seq} with...`, wide: true,
+      body: `<select data-base>${siblings.map((r) => `<option value="${esc(r.id)}" ${r.id === pick ? "selected" : ""}>Rev ${r.seq}${r.title ? " - " + esc(r.title) : ""}</option>`).join("")}</select>
+        <div data-cmp style="margin-top:12px"></div>`,
+      actions: [{ label: "Close", primary: true }],
+      onOpen: (b) => { render(b, pick); $("[data-base]", b).addEventListener("change", (e) => render(b, e.target.value)); },
+    });
   }
 
   async patchFile(fileId, body) {
@@ -2337,6 +2390,20 @@ class RunView {
     return { list, base, total: all.length };
   }
 
+  changesBanner() {
+    const ch = this.results().changes;
+    if (!ch) return "";
+    const res = this.results().resolved_findings || [];
+    return `<div class="banner info changes"><span class="grow"><strong>Compared with Rev ${esc(ch.base_seq)}:</strong>
+      ${ch.new} new, ${ch.changed} changed, ${ch.unchanged} unchanged, ${ch.resolved} resolved.
+      ${ch.triage_carried ? `Your triage of ${ch.triage_carried} finding(s) was carried over.` : ""}</span>
+      ${res.length ? `<button class="btn sm" data-show-resolved>${this.showResolved ? "Hide" : "Show"} resolved</button>` : ""}
+      <button class="btn sm" data-compare>Compare&hellip;</button></div>
+      ${this.showResolved && res.length ? `<div class="card resolved-list"><h4 style="margin:0 0 6px">Resolved since Rev ${esc(ch.base_seq)}</h4>
+        <ul class="cmp-list">${res.map((x) => `<li><span class="mono small">${esc(x.id)}</span> <span class="badge sev-${esc(x.severity || "minor")}">${esc(x.severity || "")}</span>
+        <s>${esc(x.topic)}</s>${x.location ? ` <span class="muted">&middot; ${esc(x.location)}</span>` : ""} <span class="muted small">(was ${esc(x.prev_status)})</span></li>`).join("")}</ul></div>` : ""}`;
+  }
+
   renderFindingList() {
     const wrap = $("[data-flist]", this.el);
     if (!wrap) return;
@@ -2344,8 +2411,8 @@ class RunView {
     this.renderSevChips(base);
     $("[data-fcount]", this.el).textContent = list.length === total ? plural(total, "finding") : `Showing ${list.length} of ${total}`;
     const rfiMap = this.rfiByFinding();
-    wrap.innerHTML = list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
-      : `<div class="card empty"><h3>No findings match these filters</h3><button class="btn" data-act="reset-filters">Clear filters</button></div>`;
+    wrap.innerHTML = this.changesBanner() + (list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
+      : `<div class="card empty"><h3>No findings match these filters</h3><button class="btn" data-act="reset-filters">Clear filters</button></div>`);
     requestAnimationFrame(() => $$("textarea", wrap).forEach(autoGrow));
   }
 
@@ -2391,6 +2458,9 @@ class RunView {
           ${d.issue_class ? `<span class="badge class">${esc(classes[d.issue_class] || d.issue_class.replace(/_/g, " "))}</span>` : ""}
           ${scope ? `<span class="badge scope">${esc(scope)}</span>` : ""}
           ${d.low_confidence ? `<span class="badge verify" title="Rests on OCR text or partly legible drawing values">verify</span>` : ""}
+          ${d.change === "new" && this.results().changes ? `<span class="badge chg-new" title="Not in Rev ${esc(this.results().changes.base_seq)}">new</span>` : ""}
+          ${d.change === "changed" ? `<span class="badge chg-changed" title="${esc((d.change_detail || []).join("; "))}">changed</span>` : ""}
+          ${rv.carried_from ? `<span class="badge outline" title="Your triage from ${esc(rv.carried_from)} was carried over${rv.reopened ? " - reopened: " + esc(rv.reopened) : ""}">&#8617; ${esc(rv.carried_from)}</span>` : ""}
           ${d.disputed ? `<span class="badge disputed" title="${esc((d.verification || {}).reason || "An independent model judged this not to be a real conflict")}">second opinion: not a conflict</span>`
             : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent model (${esc(d.verification.model || "")})">&#10003; double-checked</span>` : ""}
           ${status !== "open" ? `<span class="badge ${status === "accepted" ? "ok" : "outline"}">${esc(status)}</span>` : ""}
@@ -2572,7 +2642,9 @@ class RunView {
       <div class="card-head">
         <div><div class="muted small mono">${esc(rfi.rfi_no)}${rfi.manual ? " &middot; added by hand" : ""}${rfi.request_type ? ` &middot; ${esc(String(rfi.request_type).replace(/_/g, " "))}` : ""}</div>
           <h3 data-subj-h>${esc(rfi.subject) || "Untitled RFI"}</h3>
-          <div class="hint" data-edited>${rfi.edited_at ? `Edited by ${esc(rfi.edited_by)} ${timeEl(rfi.edited_at)}` : "AI draft - not edited yet"}</div></div>
+          <div class="hint" data-edited>${rfi.edited_at ? `Edited by ${esc(rfi.edited_by)} ${timeEl(rfi.edited_at)}` : "AI draft - not edited yet"}</div>
+          ${rfi.carried_from ? `<div class="hint">&#8617; Number${rfi.carried_edits ? " and your edited text" : ""} carried over from ${esc(rfi.carried_from)}${rfi.log_no ? ` &middot; log ${esc(rfi.log_no)}` : ""}</div>` : ""}
+          ${rfi.carried_note ? `<div class="banner info" style="margin:8px 0 0"><span class="grow">${esc(rfi.carried_note)}</span></div>` : ""}</div>
         <span data-rfi-save></span>
       </div>
       ${ids.length ? `<div class="linked"><span class="muted">From findings:</span>${ids.map((id) => `<button class="badge outline" data-goto-finding="${esc(id)}">${esc(id)}</button>`).join("")}
@@ -2585,6 +2657,9 @@ class RunView {
       </div>
       <div class="fields">${RFI_FIELDS.map(([k, l, rows]) => `<label class="field"><span>${l}</span>
         <textarea data-rf="${k}" rows="${rows}">${esc(val(k))}</textarea></label>`).join("")}</div>
+      ${rfi.previous_text ? `<details class="prev-text"><summary>Previous text (${esc(rfi.carried_from || "earlier revision")})</summary>
+        ${["subject", "discrepancy_summary", "question", "proposed_solution"].filter((k) => rfi.previous_text[k]).map((k) =>
+          `<div class="field-label">${esc(k.replace(/_/g, " "))}</div><div class="prev-val">${esc(Array.isArray(rfi.previous_text[k]) ? rfi.previous_text[k].join("\n") : rfi.previous_text[k])}</div>`).join("")}</details>` : ""}
       <div data-rfi-actions></div>
     </section>`;
     wrap.addEventListener("input", (e) => this.onRfiField(e));
@@ -2747,6 +2822,12 @@ class RunView {
     if (mv) { const f = this.run.files.find((x) => x.id === mv.dataset.move); if (f) this.patchFile(f.id, { slot: f.slot === "a" ? "b" : "a" }); return; }
     const rm = t.closest("[data-remove]");
     if (rm) { this.removeFile(rm.dataset.remove); return; }
+    const rep = t.closest("[data-replace]");
+    if (rep && !this.readOnly()) { this.replaceFile(rep.dataset.replace); return; }
+    const cmp = t.closest("[data-compare]");
+    if (cmp) { this.compareDialog(); return; }
+    const showRes = t.closest("[data-show-resolved]");
+    if (showRes) { this.showResolved = !this.showResolved; this.renderFindingList(); return; }
 
     const act = t.closest("[data-act]");
     if (!act) return;

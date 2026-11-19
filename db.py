@@ -211,6 +211,10 @@ run_files = Table(
     Column("sha256", String(64)),
     Column("inspected_at", UTCDateTime),
     Column("created_at", UTCDateTime, nullable=False),
+    # Revisions (migration 0004): the same document across revisions and its versions
+    Column("lineage_id", String(32)),                       # stable id of "this document" across revisions
+    Column("supersedes", Unicode(300)),                     # name of the version this file replaced
+    Column("supersedes_sha256", String(64)),
     Index("ix_run_files_run", "run_id", "slot", "position"),
     Index("ix_run_files_sha", "sha256"),
 )

@@ -516,19 +516,22 @@ def runs_with_status(statuses) -> List[Dict[str, Any]]:
 
 def add_run_file(run_id: str, slot: str, name: str, path: str, kind: str, size: int,
                  detected_kind: str = None, detected_reason: str = None, pages: int = None,
-                 problem: str = None, inspected_at: str = None, sha256: str = None) -> Dict[str, Any]:
+                 problem: str = None, inspected_at: str = None, sha256: str = None, lineage_id: str = None,
+                 supersedes: str = None, supersedes_sha256: str = None, position: int = None) -> Dict[str, Any]:
     """`path` is the file's key in the file store (an absolute path inside the store is converted)."""
     if os.path.isabs(path):
         path = file_store.store().key_for(path)
     file_id = new_id()
     with tx() as conn:
-        position = (conn.execute(select(func.max(run_files.c.position)).where(and_(
-            run_files.c.run_id == run_id, run_files.c.slot == slot))).scalar())
-        position = 0 if position is None else position + 1
+        if position is None:
+            position = (conn.execute(select(func.max(run_files.c.position)).where(and_(
+                run_files.c.run_id == run_id, run_files.c.slot == slot))).scalar())
+            position = 0 if position is None else position + 1
         conn.execute(insert(run_files).values(
             id=file_id, run_id=run_id, slot=slot, name=name, path=path, kind=kind, detected_kind=detected_kind,
             detected_reason=detected_reason, size=size, position=position, pages=pages, problem=problem,
-            sha256=sha256, inspected_at=inspected_at, created_at=now()))
+            sha256=sha256, inspected_at=inspected_at, created_at=now(), lineage_id=lineage_id or file_id,
+            supersedes=supersedes, supersedes_sha256=supersedes_sha256))
     return get_run_file(file_id)
 
 
@@ -541,6 +544,16 @@ def list_run_files(run_id: str) -> List[Dict[str, Any]]:
 def get_run_file(file_id: str) -> Optional[Dict[str, Any]]:
     with tx() as conn:
         return _d(conn.execute(select(run_files).where(run_files.c.id == file_id)).first())
+
+
+def project_file_history(project_id: str) -> List[Dict[str, Any]]:
+    """Every file of every revision of a project, oldest revision first (for document histories)."""
+    stmt = (select(run_files, runs.c.seq, runs.c.status.label("run_status"))
+            .select_from(run_files.join(runs, runs.c.id == run_files.c.run_id))
+            .where(and_(runs.c.project_id == project_id, runs.c.deleted_at.is_(None)))
+            .order_by(runs.c.seq, run_files.c.slot, run_files.c.position))
+    with tx() as conn:
+        return _all(conn, stmt)
 
 
 def uninspected_file_ids() -> List[str]:
@@ -580,7 +593,8 @@ def copy_run_files(src_run_id: str, dst_run_id: str, skip_ids: Iterable[str] = (
         store.copy(f["path"], dst_key)
         out.append(add_run_file(dst_run_id, f["slot"], f["name"], dst_key, f["kind"], f["size"],
                                 f.get("detected_kind"), f.get("detected_reason"), f.get("pages"),
-                                f.get("problem"), f.get("inspected_at"), f.get("sha256")))
+                                f.get("problem"), f.get("inspected_at"), f.get("sha256"),
+                                lineage_id=f.get("lineage_id") or f["id"], position=f["position"]))
     return out
 
 

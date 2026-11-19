@@ -499,6 +499,20 @@ def fleet_report(run_id: str) -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
+HOOK_MODULES = ("project_settings", "revisions", "rfi_log", "collab")
+
+
+def load_hooks() -> None:
+    """Import the modules that add scan hooks (a worker process does not import the web app)."""
+    import importlib
+    for name in HOOK_MODULES:
+        try:
+            importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if exc.name != name:
+                raise
+
+
 # Hooks later phases plug into (fleet options, carry-forward, notifications).
 _SCAN_EXTRAS: list = []
 _FINALISERS: list = []
@@ -558,6 +572,7 @@ class WorkerPool:
         self._threads: List[threading.Thread] = []
 
     def start(self) -> "WorkerPool":
+        load_hooks()
         install_log_capture()
         recover_after_restart()
         for kind, count in self.plan:
