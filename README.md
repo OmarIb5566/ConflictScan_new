@@ -10,6 +10,17 @@ sketches - labelled with a stage name the user types in (`Tender BOQ + Specs`,
 `IFC Structural`, `Addendum No. 2`, …). Those labels flow verbatim through
 every prompt, every finding, and every RFI.
 
+## Documentation for administrators
+
+- [docs/INSTALL.md](docs/INSTALL.md): installing on the A100 server
+  (services, models per GPU, HTTPS, upgrades).
+- [docs/MIGRATION.md](docs/MIGRATION.md): moving the data from the
+  workstation to the host database and file store, with verification.
+- [docs/ADMIN.md](docs/ADMIN.md): users and roles, the scan queue, the AI
+  fleet, health, audit, backups and retention.
+- [docs/IT_QUESTIONS.md](docs/IT_QUESTIONS.md): what to ask the host
+  company's IT.
+
 ## What the model learned from real RFIs
 
 The detection and drafting logic is driven by a knowledge base built from two

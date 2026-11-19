@@ -33,7 +33,8 @@ if __name__ == "__main__":
     print(f"  files:    {file_store.store().describe()}")
     print(f"  workers:  {'embedded, ' + str(jobs.WORKERS) + ' scan thread(s)' if embedded else 'separate worker service'}")
     jobs.start_embedded_worker()
-    serve(api.app, host=host, port=port, threads=threads, ident="ConflictScan",
-          trusted_proxy=os.environ.get("CONFLICTSCAN_TRUSTED_PROXY") or None,
-          trusted_proxy_headers={"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"}
-          if os.environ.get("CONFLICTSCAN_TRUSTED_PROXY") else None)
+    options = {"host": host, "port": port, "threads": threads, "ident": "ConflictScan"}
+    proxy = os.environ.get("CONFLICTSCAN_TRUSTED_PROXY")
+    if proxy:      # e.g. 127.0.0.1 when IIS runs on the same server
+        options.update(trusted_proxy=proxy, trusted_proxy_headers={"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"})
+    serve(api.app, **options)
