@@ -38,6 +38,7 @@ from nodes.document_analysis import analyze_documents
 from nodes.conflict_scan import conflict_scan_agent
 from nodes.rfi_drafting import rfi_drafting_agent
 from nodes.export import export_discrepancy_register
+from nodes.run_paths import scan_dirs
 
 from edges import route_input_valid, route_discrepancies
 
@@ -108,6 +109,8 @@ def run_conflict_scan(
     export_format: str = "excel",
     on_node_complete: Callable[[str, Dict[str, Any]], None] = None,
     should_stop: Callable[[], bool] = None,
+    output_dir: str = None,
+    debug_dir: str = None,
 ) -> Dict[str, Any]:
     """
     Run a conflict scan over two document sets from different project stages.
@@ -123,6 +126,8 @@ def run_conflict_scan(
         as the engineer described it. Used verbatim in prompts and outputs.
     review_focus : optional free text steering what the scan pays attention to
     rfi_template_path : optional .docx RFI form; defaults to templates_rfi/
+    output_dir / debug_dir : where this scan writes its register + RFI documents
+        and its diagnostic logs (nodes/run_paths.py); default: a temp folder / none
     on_node_complete : optional callback(node_name, node_delta) fired as each
         graph node finishes - used by the web app to show live progress
     should_stop : optional callable; when it returns True the run stops after
@@ -166,20 +171,21 @@ def run_conflict_scan(
     if review_focus:
         print(f"   Focus: {review_focus}")
 
-    if on_node_complete is None and should_stop is None:
-        return conflict_scan_graph.invoke(initial_state)
+    with scan_dirs(output_dir=output_dir, debug_dir=debug_dir):
+        if on_node_complete is None and should_stop is None:
+            return conflict_scan_graph.invoke(initial_state)
 
-    final_state = initial_state
-    for mode, chunk in conflict_scan_graph.stream(initial_state, stream_mode=["updates", "values"]):
-        if mode == "values":
-            final_state = chunk
-            continue
-        for node_name, delta in (chunk or {}).items():
-            if on_node_complete:
-                on_node_complete(node_name, delta or {})
-        if should_stop and should_stop():
-            raise ScanCancelled()
-    return final_state
+        final_state = initial_state
+        for mode, chunk in conflict_scan_graph.stream(initial_state, stream_mode=["updates", "values"]):
+            if mode == "values":
+                final_state = chunk
+                continue
+            for node_name, delta in (chunk or {}).items():
+                if on_node_complete:
+                    on_node_complete(node_name, delta or {})
+            if should_stop and should_stop():
+                raise ScanCancelled()
+        return final_state
 
 
 class ScanCancelled(Exception):

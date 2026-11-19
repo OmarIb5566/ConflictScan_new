@@ -28,7 +28,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-DATA_DIR = os.environ.get("CONFLICTSCAN_DATA_DIR") or os.path.join(os.getcwd(), "data")
+# Next to the code by default (not the working directory, which is System32 for a Windows service).
+DATA_DIR = os.environ.get("CONFLICTSCAN_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DATA_DIR, "conflictscan.db")
 RUNS_DIR = os.path.join(DATA_DIR, "runs")
 
@@ -97,6 +98,9 @@ CREATE TABLE IF NOT EXISTS run_files (
     detected_reason TEXT,
     size           INTEGER NOT NULL DEFAULT 0,
     position       INTEGER NOT NULL DEFAULT 0,
+    pages          INTEGER,
+    problem        TEXT,
+    inspected_at   TEXT,
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_run_files_run ON run_files(run_id, slot, position);
@@ -140,6 +144,11 @@ def init_db() -> None:
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Columns added after the first release (databases created before them).
+        have = {row[1] for row in conn.execute("PRAGMA table_info(run_files)")}
+        for column, ddl in (("pages", "INTEGER"), ("problem", "TEXT"), ("inspected_at", "TEXT")):
+            if column not in have:
+                conn.execute(f"ALTER TABLE run_files ADD COLUMN {column} {ddl}")
 
 
 def _row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -423,7 +432,8 @@ def runs_with_status(statuses) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def add_run_file(run_id: str, slot: str, name: str, path: str, kind: str, size: int,
-                 detected_kind: str = None, detected_reason: str = None) -> Dict[str, Any]:
+                 detected_kind: str = None, detected_reason: str = None, pages: int = None,
+                 problem: str = None, inspected_at: str = None) -> Dict[str, Any]:
     with connect() as conn:
         position = conn.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM run_files WHERE run_id = ? AND slot = ?",
@@ -432,8 +442,9 @@ def add_run_file(run_id: str, slot: str, name: str, path: str, kind: str, size: 
         file_id = new_id()
         conn.execute(
             "INSERT INTO run_files (id, run_id, slot, name, path, kind, detected_kind, detected_reason, size, "
-            "position, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (file_id, run_id, slot, name, path, kind, detected_kind, detected_reason, size, position, now()),
+            "position, pages, problem, inspected_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (file_id, run_id, slot, name, path, kind, detected_kind, detected_reason, size, position,
+             pages, problem, inspected_at, now()),
         )
         return _row(conn.execute("SELECT * FROM run_files WHERE id = ?", (file_id,)).fetchone())
 
@@ -451,8 +462,14 @@ def get_run_file(file_id: str) -> Optional[Dict[str, Any]]:
         return _row(conn.execute("SELECT * FROM run_files WHERE id = ?", (file_id,)).fetchone())
 
 
+def uninspected_file_ids() -> List[str]:
+    with connect() as conn:
+        return [r[0] for r in conn.execute("SELECT id FROM run_files WHERE inspected_at IS NULL")]
+
+
 def update_run_file(file_id: str, **fields) -> None:
-    allowed = {k: v for k, v in fields.items() if k in ("kind", "slot", "position")}
+    allowed = {k: v for k, v in fields.items() if k in (
+        "kind", "slot", "position", "detected_kind", "detected_reason", "pages", "problem", "inspected_at")}
     if not allowed:
         return
     sets = ", ".join(f"{k} = ?" for k in allowed)
@@ -483,4 +500,5 @@ def copy_run_files(src_run_id: str, dst_run_id: str) -> None:
         except OSError:
             shutil.copy2(f["path"], dst_path)
         add_run_file(dst_run_id, f["slot"], f["name"], dst_path, f["kind"], f["size"],
-                     f.get("detected_kind"), f.get("detected_reason"))
+                     f.get("detected_kind"), f.get("detected_reason"), f.get("pages"),
+                     f.get("problem"), f.get("inspected_at"))

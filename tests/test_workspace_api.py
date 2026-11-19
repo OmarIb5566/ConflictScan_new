@@ -16,6 +16,7 @@ import time
 import zipfile
 
 import pytest
+from flask.testing import FlaskClient
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -26,6 +27,29 @@ os.environ["CONFLICTSCAN_SECRET_KEY"] = "test"
 import api      # noqa: E402
 import graph    # noqa: E402
 import jobs     # noqa: E402
+import security  # noqa: E402
+import upload_checks  # noqa: E402
+
+PASSWORD = "secret12"
+DXF = b"0\nSECTION\n2\nHEADER\n0\nENDSEC\n0\nEOF\n"
+
+
+class CsrfClient(FlaskClient):
+    """A test client that behaves like the web page: echoes the cs_csrf cookie in X-CSRF-Token."""
+
+    def open(self, *args, **kwargs):
+        method = (kwargs.get("method") or "GET").upper()
+        if method in security.UNSAFE_METHODS and not kwargs.pop("no_csrf", False):
+            if self.get_cookie(security.CSRF_COOKIE) is None:
+                super().open("/api/auth/status")
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault(security.CSRF_HEADER, self.get_cookie(security.CSRF_COOKIE).value)
+            kwargs["headers"] = headers
+        kwargs.pop("no_csrf", None)
+        return super().open(*args, **kwargs)
+
+
+api.app.test_client_class = CsrfClient
 
 DISCREPANCIES = [
     {"id": "D-001", "topic": "Concrete grade - columns", "severity": "critical", "scope": "between",
@@ -43,7 +67,8 @@ def fake_scan(**kwargs):
             kwargs["on_node_complete"](node, {"discrepancies": DISCREPANCIES} if node == "conflict_scan" else {})
         if kwargs.get("should_stop") and kwargs["should_stop"]():
             raise graph.ScanCancelled()
-    register = os.path.join(ROOT, "exports", f"stub_register_{time.time_ns()}.xlsx")
+    assert kwargs["output_dir"] and not kwargs["output_dir"].startswith(ROOT)   # per-scan folder, not the repo
+    register = os.path.join(kwargs["output_dir"], f"stub_register_{time.time_ns()}.xlsx")
     os.makedirs(os.path.dirname(register), exist_ok=True)
     with open(register, "wb") as f:
         f.write(b"stub")
@@ -68,13 +93,14 @@ def fake_scan(**kwargs):
 @pytest.fixture(autouse=True)
 def stub_graph(monkeypatch):
     monkeypatch.setattr(graph, "run_conflict_scan", fake_scan)
+    security.login_throttle.reset()
 
 
 def client_for(username):
     c = api.app.test_client()
-    r = c.post("/api/auth/register", json={"username": username, "password": "secret1", "display_name": username.title()})
+    r = c.post("/api/auth/register", json={"username": username, "password": PASSWORD, "display_name": username.title()})
     if r.status_code == 409:
-        r = c.post("/api/auth/login", json={"username": username, "password": "secret1"})
+        r = c.post("/api/auth/login", json={"username": username, "password": PASSWORD})
     assert r.status_code == 200, r.get_json()
     return c
 
@@ -92,6 +118,17 @@ def wait_for(c, run_id, statuses=("complete", "failed", "cancelled"), timeout=15
 def upload(c, run_id, slot, name, content=b"hello"):
     return c.post(f"/api/runs/{run_id}/files", data={"slot": slot, "files": (io.BytesIO(content), name)},
                   content_type="multipart/form-data")
+
+
+def inspected(c, run_id, timeout=10):
+    """The run's files once the background upload checks have finished."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        files = c.get(f"/api/runs/{run_id}").get_json()["files"]
+        if not any(f["inspecting"] for f in files):
+            return files
+        time.sleep(0.05)
+    raise AssertionError("upload checks did not finish")
 
 
 def new_scanned_run(c, name="Tower A"):
@@ -188,8 +225,10 @@ def test_start_requires_both_sets_and_file_rules():
     run_id = c.post("/api/projects", json={"name": "Empty"}).get_json()["run"]["id"]
     assert c.post(f"/api/runs/{run_id}/start").status_code == 400
     assert upload(c, run_id, "a", "plan.dwg").status_code == 400
-    f = upload(c, run_id, "a", "sheet.dxf").get_json()["added"][0]
-    assert f["detected_kind"] == "drawing"
+    f = upload(c, run_id, "a", "sheet.dxf", DXF).get_json()["added"][0]
+    assert f["inspecting"] is True
+    f = inspected(c, run_id)[0]
+    assert f["detected_kind"] == "drawing" and f["problem"] is None
     assert c.patch(f"/api/runs/{run_id}/files/{f['id']}", json={"kind": "document"}).status_code == 400
     assert c.patch(f"/api/runs/{run_id}/files/{f['id']}", json={"slot": "b"}).get_json()["slot"] == "b"
     assert c.delete(f"/api/runs/{run_id}/files/{f['id']}").status_code == 200
@@ -228,3 +267,181 @@ def test_cancel_queued_run_and_prefs():
     c.put("/api/me/prefs", json={"workspace": {"tabs": ["home", f"run:{run_id}"], "active": "home"}, "pinned": ["x"], "bogus": 1})
     prefs = c.get("/api/me/prefs").get_json()
     assert prefs["workspace"]["tabs"][1] == f"run:{run_id}" and "bogus" not in prefs
+
+
+# ---------------------------------------------------------------------------
+# Phase 0: security
+# ---------------------------------------------------------------------------
+
+def test_cross_origin_requests_get_no_access():
+    c = client_for("erin")
+    r = c.get("/api/projects", headers={"Origin": "https://evil.example"})
+    assert r.status_code == 200
+    assert "Access-Control-Allow-Origin" not in r.headers
+    assert "Access-Control-Allow-Credentials" not in r.headers
+
+
+def test_named_origin_can_be_allowed(monkeypatch):
+    monkeypatch.setattr(security, "ALLOWED_ORIGINS", {"https://portal.rowad.local"})
+    c = client_for("erin")
+    r = c.get("/api/projects", headers={"Origin": "https://portal.rowad.local"})
+    assert r.headers["Access-Control-Allow-Origin"] == "https://portal.rowad.local"
+    assert "Access-Control-Allow-Origin" not in c.get("/api/projects", headers={"Origin": "https://x.example"}).headers
+
+
+def test_state_changes_need_the_csrf_token():
+    c = client_for("frank")
+    r = c.post("/api/projects", json={"name": "Forged"}, no_csrf=True)
+    assert r.status_code == 403 and r.get_json()["csrf_failed"]
+    r = c.post("/api/projects", json={"name": "Forged"}, headers={security.CSRF_HEADER: "wrong"})
+    assert r.status_code == 403
+    assert c.post("/api/projects", json={"name": "Real"}).status_code == 201
+    # a stranger's browser (no session) cannot sign in on someone's behalf either
+    assert api.app.test_client().post("/api/auth/login", json={"username": "frank", "password": PASSWORD},
+                                      no_csrf=True).status_code == 403
+
+
+def test_sign_in_rotates_the_csrf_token():
+    c = client_for("frank")
+    before = c.get_cookie(security.CSRF_COOKIE).value
+    c.post("/api/auth/logout")
+    assert c.post("/api/auth/login", json={"username": "frank", "password": PASSWORD}).status_code == 200
+    assert c.get_cookie(security.CSRF_COOKIE).value != before
+
+
+def test_repeated_wrong_passwords_lock_the_username():
+    client_for("gina")
+    c = api.app.test_client()
+    for _ in range(security.LOGIN_MAX_FAILS):
+        assert c.post("/api/auth/login", json={"username": "gina", "password": "nope"}).status_code == 401
+    r = c.post("/api/auth/login", json={"username": "gina", "password": PASSWORD})
+    assert r.status_code == 429 and "Too many" in r.get_json()["error"]
+    # other people are not affected
+    assert c.post("/api/auth/login", json={"username": "frank", "password": PASSWORD}).status_code in (200, 401)
+
+
+def test_short_passwords_are_refused():
+    c = api.app.test_client()
+    r = c.post("/api/auth/register", json={"username": "shorty", "password": "1234567"})
+    assert r.status_code == 400 and "8 characters" in r.get_json()["error"]
+
+
+def test_idle_sessions_are_signed_out():
+    c = client_for("hana")
+    assert c.get("/api/projects").status_code == 200
+    with c.session_transaction() as sess:
+        sess["seen"] = int(time.time()) - security.IDLE_SECONDS - 5
+    r = c.get("/api/projects")
+    assert r.status_code == 401 and r.get_json()["expired"] is True
+    assert c.get("/api/projects").status_code == 401        # stays signed out
+
+
+def test_background_polling_does_not_keep_a_session_alive():
+    c = client_for("hana")
+    stamp = int(time.time()) - 3600
+    with c.session_transaction() as sess:
+        sess["seen"] = stamp
+    c.get("/api/jobs")
+    with c.session_transaction() as sess:
+        assert sess["seen"] == stamp
+    c.get("/api/projects")
+    with c.session_transaction() as sess:
+        assert sess["seen"] > stamp
+
+
+def test_security_headers_and_no_legacy_endpoints():
+    c = client_for("ivan")
+    r = c.get("/")
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert c.get("/api/projects").headers["Cache-Control"] == "no-store"
+    assert c.post("/scan").status_code in (404, 405)
+    assert c.get("/exports/anything.xlsx").status_code == 404
+    assert api.app.test_client().get("/api/rfi-template").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Phase 0: upload checks
+# ---------------------------------------------------------------------------
+
+def _pdf_bytes(pages):
+    import fitz
+    doc = fitz.open()
+    for i in range(pages):
+        doc.new_page().insert_text((72, 72), f"Sheet {i + 1}")
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_files_whose_content_does_not_match_the_extension_are_refused():
+    c = client_for("judy")
+    run_id = c.post("/api/projects", json={"name": "Uploads"}).get_json()["run"]["id"]
+    for name, content in (("fake.pdf", b"MZ\x90\x00 not a pdf"), ("photo.png", b"MZ\x90\x00"),
+                          ("sheet.xlsx", b"plain text"), ("notes.txt", b"bin\x00ary"), ("empty.csv", b"")):
+        r = upload(c, run_id, "a", name, content)
+        assert r.status_code == 400, name
+        assert name in r.get_json()["errors"][0]
+    assert c.get(f"/api/runs/{run_id}").get_json()["files"] == []
+    assert os.listdir(api.storage.run_dir(run_id, "inputs")) == []      # refused files are not kept
+
+
+def test_oversized_files_are_refused(monkeypatch):
+    monkeypatch.setattr(upload_checks, "MAX_FILE_MB", 0)
+    c = client_for("judy")
+    run_id = c.post("/api/projects", json={"name": "Big"}).get_json()["run"]["id"]
+    r = upload(c, run_id, "a", "big.txt", b"x" * 10)
+    assert r.status_code == 400 and "limit per file" in r.get_json()["errors"][0]
+
+
+def test_pdf_page_limit_blocks_the_scan(monkeypatch):
+    monkeypatch.setattr(upload_checks, "MAX_PDF_PAGES", 3)
+    c = client_for("kate")
+    run_id = c.post("/api/projects", json={"name": "Pages"}).get_json()["run"]["id"]
+    assert upload(c, run_id, "a", "ok.pdf", _pdf_bytes(2)).status_code == 201
+    assert upload(c, run_id, "b", "huge.pdf", _pdf_bytes(5)).status_code == 201
+    files = {f["name"]: f for f in inspected(c, run_id)}
+    assert files["ok.pdf"]["pages"] == 2 and files["ok.pdf"]["problem"] is None
+    assert files["huge.pdf"]["pages"] == 5 and "limit is 3" in files["huge.pdf"]["problem"]
+    r = c.post(f"/api/runs/{run_id}/start")
+    assert r.status_code == 400 and "huge.pdf" in r.get_json()["error"]
+    # removing the file clears the block
+    c.delete(f"/api/runs/{run_id}/files/{files['huge.pdf']['id']}")
+    upload(c, run_id, "b", "spec.txt", b"Concrete C35")
+    inspected(c, run_id)
+    assert c.post(f"/api/runs/{run_id}/start").status_code == 200
+
+
+def test_password_protected_pdf_is_flagged():
+    import fitz
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "secret")
+    data = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw", owner_pw="pw")
+    doc.close()
+    c = client_for("kate")
+    run_id = c.post("/api/projects", json={"name": "Locked"}).get_json()["run"]["id"]
+    assert upload(c, run_id, "a", "locked.pdf", data).status_code == 201
+    assert "password-protected" in inspected(c, run_id)[0]["problem"]
+
+
+def test_cloned_runs_keep_inspection_results():
+    c = client_for("kate")
+    _project_id, run_id = new_scanned_run(c, "Clone checks")
+    wait_for(c, run_id)
+    clone = c.post(f"/api/runs/{run_id}/clone").get_json()
+    files = c.get(f"/api/runs/{clone['id']}").get_json()["files"]
+    assert files and not any(f["inspecting"] for f in files)
+
+
+def test_restart_finishes_interrupted_upload_checks():
+    c = client_for("kate")
+    run_id = c.post("/api/projects", json={"name": "Restart"}).get_json()["run"]["id"]
+    fid = upload(c, run_id, "a", "boq.txt", b"Concrete C40").get_json()["added"][0]["id"]
+    inspected(c, run_id)
+    api.storage.update_run_file(fid, inspected_at=None, detected_kind=None)    # as if the server died mid-check
+    stale = os.path.join(jobs._scratch_root(), "scan_leftover")
+    os.makedirs(stale)
+    jobs.recover_after_restart()
+    assert inspected(c, run_id)[0]["detected_kind"] == "document"
+    assert not os.path.exists(stale)

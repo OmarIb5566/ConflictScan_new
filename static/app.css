@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+/* Fonts: no external font service (the app runs on-prem). Inter / Poppins are used when installed on the PC, otherwise Segoe UI. */
 
 /* ------------------------------------------------------------------ tokens */
 :root {
@@ -80,7 +80,7 @@ body {
   font: 14px/1.5 'Inter', 'Segoe UI', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-h1, h2, h3, h4 { font-family: 'Poppins', 'Inter', sans-serif; letter-spacing: -.2px; margin: 0; }
+h1, h2, h3, h4 { font-family: 'Poppins', 'Inter', 'Segoe UI', system-ui, sans-serif; letter-spacing: -.2px; margin: 0; }
 h2 { font-size: 20px; font-weight: 700; }
 h3 { font-size: 16px; font-weight: 700; }
 h4 { font-size: 14px; font-weight: 700; }
@@ -151,7 +151,7 @@ kbd {
   color: var(--ink);
   padding: 7px 14px;
   border-radius: 999px;
-  font: 600 13px/1.2 'Inter', sans-serif;
+  font: 600 13px/1.2 'Inter', 'Segoe UI', system-ui, sans-serif;
   cursor: pointer;
   white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s;
@@ -200,7 +200,7 @@ kbd {
   border: none;
   background: transparent;
   color: var(--ink-soft);
-  font: 600 12.5px 'Inter', sans-serif;
+  font: 600 12.5px 'Inter', 'Segoe UI', system-ui, sans-serif;
   padding: 5px 12px;
   border-radius: 999px;
   cursor: pointer;
@@ -275,6 +275,7 @@ kbd {
   flex: none;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner.sm { width: 9px; height: 9px; border-width: 1.5px; vertical-align: -1px; }
 
 /* ------------------------------------------------------------------ auth */
 .auth-screen {
@@ -350,7 +351,7 @@ kbd {
   border-radius: 50%;
   display: inline-grid;
   place-items: center;
-  font: 700 12px 'Inter', sans-serif;
+  font: 700 12px 'Inter', 'Segoe UI', system-ui, sans-serif;
   color: #fff;
   flex: none;
 }
@@ -605,7 +606,7 @@ table.list td.actions { width: 1%; white-space: nowrap; text-align: right; }
   display: flex; width: 100%; align-items: center; gap: 9px;
   border: none; background: none; color: var(--ink);
   text-align: left; padding: 7px 10px; border-radius: 7px;
-  font: 500 13px 'Inter', sans-serif; cursor: pointer;
+  font: 500 13px 'Inter', 'Segoe UI', system-ui, sans-serif; cursor: pointer;
 }
 .menu button:hover { background: var(--surface-2); }
 .menu button.danger { color: var(--danger); }
@@ -700,7 +701,7 @@ table.list td.actions { width: 1%; white-space: nowrap; text-align: right; }
   padding: 8px 14px;
   border-radius: 999px;
   color: var(--ink-soft);
-  font: 600 13px 'Inter', sans-serif;
+  font: 600 13px 'Inter', 'Segoe UI', system-ui, sans-serif;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -761,7 +762,7 @@ table.list td.actions { width: 1%; white-space: nowrap; text-align: right; }
   font-size: 13px;
 }
 .files .ext {
-  font: 700 10px 'Inter', sans-serif;
+  font: 700 10px 'Inter', 'Segoe UI', system-ui, sans-serif;
   text-transform: uppercase;
   padding: 3px 5px;
   border-radius: 5px;
@@ -775,6 +776,8 @@ table.list td.actions { width: 1%; white-space: nowrap; text-align: right; }
 .files .fn .sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .files select { width: auto; padding: 3px 6px; font-size: 12px; }
 .files li.uploading { opacity: .7; }
+.files li.has-problem { border-color: var(--danger); background: var(--danger-soft); }
+.files .file-problem { font-size: 11.5px; color: var(--danger); margin-top: 2px; white-space: normal; }
 .files .bar { grid-column: 1 / -1; height: 3px; background: var(--surface-3); border-radius: 2px; overflow: hidden; }
 .files .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
 
@@ -839,7 +842,7 @@ details > summary:hover { color: var(--ink); }
   color: var(--ink-soft);
   border-radius: 999px;
   padding: 4px 11px;
-  font: 600 12px 'Inter', sans-serif;
+  font: 600 12px 'Inter', 'Segoe UI', system-ui, sans-serif;
   cursor: pointer;
   display: inline-flex; align-items: center; gap: 6px;
 }

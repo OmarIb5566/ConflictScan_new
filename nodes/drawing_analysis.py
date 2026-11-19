@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from nodes.analysis_framework import FRAMEWORK_TEXT, category_rank, normalise_category
 from nodes.file_ingest import decode_symbol_font
+from nodes.run_paths import debug_dir
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded clients (avoid import cost when no drawing is ever profiled)
@@ -94,7 +95,6 @@ DIMENSION_OVERRIDE_TOLERANCE = 0.01   # 1% - same tolerance conflict_scan uses f
 # Every build_drawing_profile() call writes one JSON dump here - render/tile
 # PNGs are deleted after the scan (see api.py), so this is the only lasting
 # record of what was actually read.
-DEBUG_LOG_DIR = os.path.join(os.getcwd(), "debug_logs")
 
 
 def _safe_name(name: str) -> str:
@@ -1892,11 +1892,13 @@ def build_drawing_profile(
 
 def _write_debug_log(label: str, source_name: str, profile: Dict[str, Any],
                      debug_tiles: List[Dict[str, Any]], dxf: Optional[Dict[str, Any]]) -> None:
+    log_dir = debug_dir()
+    if not log_dir:
+        return
     try:
-        os.makedirs(DEBUG_LOG_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"{_safe_name(label)[:40]}_{_safe_name(os.path.splitext(source_name)[0])[:40]}"
-        debug_path = os.path.join(DEBUG_LOG_DIR, f"drawing_{name}_{timestamp}.json")
+        debug_path = os.path.join(log_dir, f"drawing_{name}_{timestamp}.json")
         with open(debug_path, "w", encoding="utf-8") as f:
             json.dump({
                 "label": label,

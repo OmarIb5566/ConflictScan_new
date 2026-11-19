@@ -19,8 +19,9 @@ Multi-user workspace (used by the web UI)
     /api/jobs          the user's queued / running scans (for notifications)
 
 Scans run in background workers (jobs.py); everything is stored by storage.py
-under ./data. The original single-shot endpoints (/scan, /api/rfi/export,
-/exports/<file>) are kept for scripts that call them directly.
+under ./data. Every endpoint requires sign-in; security.py adds the CSRF,
+session-timeout, sign-in throttling and same-origin rules, and
+upload_checks.py vets uploaded files before anything reads them.
 
 Windows compatible.
 """
@@ -42,35 +43,28 @@ from threading import Lock
 from flask import (
     Flask, request, jsonify, render_template, send_from_directory, send_file, session, abort,
 )
-from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import jobs
+import security
 import storage
-from graph import run_conflict_scan
-from nodes.file_ingest import (
-    DOCUMENT_EXTENSIONS, DRAWING_EXTENSIONS, DWG_HINT, classify_file, pair_drawing_files,
-)
+import upload_checks
+from nodes.file_ingest import DOCUMENT_EXTENSIONS, DRAWING_EXTENSIONS, DWG_HINT
 from nodes.rfi_drafting import resolve_template_path, build_token_values
-from nodes.rfi_knowledge import issue_classes
+from nodes.run_paths import template_dir
 from nodes.docx_template import fill_docx_template, list_template_tokens
 
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
-CORS(app, supports_credentials=True)
-
-UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
-EXPORT_FOLDER = os.path.join(os.getcwd(), "exports")
-RFI_TEMPLATE_FOLDER = os.path.join(os.getcwd(), "templates_rfi")
-for folder in (UPLOAD_FOLDER, EXPORT_FOLDER, RFI_TEMPLATE_FOLDER):
-    os.makedirs(folder, exist_ok=True)
+os.makedirs(template_dir(), exist_ok=True)
 
 storage.init_db()
 jobs.install_log_capture()
 
 MAX_FILES_PER_SET = int(os.environ.get("CONFLICTSCAN_MAX_FILES_PER_SET", "40"))
 ALLOW_SIGNUP = os.environ.get("CONFLICTSCAN_ALLOW_SIGNUP", "1").lower() not in ("0", "false", "no")
+MIN_PASSWORD = int(os.environ.get("CONFLICTSCAN_MIN_PASSWORD", "8"))
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("CONFLICTSCAN_MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
 
@@ -89,15 +83,7 @@ def _secret_key() -> str:
 
 
 app.secret_key = _secret_key()
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
-)
-
-# Completed legacy /scan results, keyed by event_id, so /api/rfi/export can re-export edited RFIs
-active_sessions = {}
-session_lock = Lock()
+security.init_app(app)
 
 # Serialises read-modify-write of one run's results JSON (two engineers editing different RFIs)
 _run_locks: dict = {}
@@ -167,6 +153,8 @@ def auth_status():
         "user": _public_user(user) if user else None,
         "signup_allowed": ALLOW_SIGNUP or storage.count_users() == 0,
         "first_user": storage.count_users() == 0,
+        "min_password": MIN_PASSWORD,
+        "csrf_token": security.csrf_token(),
     })
 
 
@@ -180,34 +168,39 @@ def auth_register():
     display_name = (body.get("display_name") or "").strip() or username
     if not re.fullmatch(r"[A-Za-z0-9._-]{3,40}", username):
         return jsonify({"error": "Username: 3-40 letters, digits, dots, dashes or underscores."}), 400
-    if len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters."}), 400
+    if len(password) < MIN_PASSWORD:
+        return jsonify({"error": f"Password must be at least {MIN_PASSWORD} characters."}), 400
     if storage.get_user_by_username(username):
         return jsonify({"error": "That username is taken."}), 409
     user = storage.create_user(username, display_name[:80], generate_password_hash(password))
-    session.clear()
-    session.permanent = True
-    session["uid"] = user["id"]
-    return jsonify({"user": _public_user(user)})
+    security.start_session(user["id"], remember=True)
+    return jsonify({"user": _public_user(user), "csrf_token": security.csrf_token()})
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def auth_login():
     body = request.get_json(silent=True) or {}
-    user = storage.get_user_by_username((body.get("username") or "").strip())
+    username = (body.get("username") or "").strip()
+    address = security.client_address()
+    wait = security.login_throttle.retry_after(username, address)
+    if wait:
+        minutes = max(1, round(wait / 60))
+        return jsonify({"error": f"Too many failed sign-ins. Try again in {minutes} minute"
+                                 f"{'s' if minutes != 1 else ''}, or ask an administrator."}), 429
+    user = storage.get_user_by_username(username)
     if not user or not check_password_hash(user["password_hash"], body.get("password") or ""):
+        security.login_throttle.failed(username, address)
         return jsonify({"error": "Wrong username or password."}), 401
-    session.clear()
-    session.permanent = bool(body.get("remember", True))
-    session["uid"] = user["id"]
+    security.login_throttle.succeeded(username)
+    security.start_session(user["id"], remember=body.get("remember", True))
     storage.touch_user(user["id"])
-    return jsonify({"user": _public_user(user)})
+    return jsonify({"user": _public_user(user), "csrf_token": security.csrf_token()})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
     session.clear()
-    return jsonify({"status": "signed out"})
+    return jsonify({"status": "signed out", "csrf_token": security.csrf_token()})
 
 
 @app.route("/api/me", methods=["PATCH"])
@@ -221,8 +214,8 @@ def update_me():
     if body.get("new_password"):
         if not check_password_hash(user["password_hash"], body.get("current_password") or ""):
             return jsonify({"error": "Current password is wrong."}), 400
-        if len(body["new_password"]) < 6:
-            return jsonify({"error": "New password must be at least 6 characters."}), 400
+        if len(body["new_password"]) < MIN_PASSWORD:
+            return jsonify({"error": f"New password must be at least {MIN_PASSWORD} characters."}), 400
         fields["password_hash"] = generate_password_hash(body["new_password"])
     storage.update_user(user["id"], **fields)
     return jsonify({"user": _public_user(storage.get_user(user["id"]))})
@@ -280,6 +273,7 @@ def _file_payload(f):
         "id": f["id"], "slot": f["slot"], "name": f["name"], "kind": f["kind"],
         "detected_kind": f.get("detected_kind"), "detected_reason": f.get("detected_reason"),
         "size": f["size"], "created_at": f["created_at"],
+        "pages": f.get("pages"), "problem": f.get("problem"), "inspecting": not f.get("inspected_at"),
     }
 
 
@@ -501,12 +495,13 @@ def run_upload(run_id):
             continue
         path = os.path.join(inputs_dir, jobs.new_upload_name(filename))
         storage_obj.save(path)
-        try:
-            detected, reason = classify_file(path, use_vision=False)
-        except Exception as exc:  # noqa: BLE001
-            detected, reason = None, f"could not inspect ({exc})"
-        record = storage.add_run_file(run_id, slot, filename, path, "auto", os.path.getsize(path),
-                                      detected, reason)
+        problem = upload_checks.sniff(path, os.path.splitext(filename)[1])
+        if problem:
+            os.remove(path)
+            errors.append(f"'{filename}' {problem}.")
+            continue
+        record = storage.add_run_file(run_id, slot, filename, path, "auto", os.path.getsize(path))
+        jobs.inspect_file_later(record["id"])      # page count, encryption, document/drawing guess
         added.append(_file_payload(record))
     if added:
         storage.update_run(run_id, user_id=request.user["id"], status="draft")
@@ -558,6 +553,9 @@ def run_start(run_id):
         return jsonify({"error": "This run is complete. Use 'Edit & re-run' to scan again."}), 409
     inputs = run.get("inputs") or {}
     files = storage.list_run_files(run_id)
+    bad = [f"{f['name']} {f['problem']}" for f in files if f.get("problem")]
+    if bad:
+        return jsonify({"error": "Remove or replace these files first: " + "; ".join(bad) + "."}), 400
     for slot in ("a", "b"):
         if not any(f["slot"] == slot for f in files) and not (inputs.get(f"document_{slot}_text") or "").strip():
             return jsonify({"error": f"Set {slot.upper()} is empty - add one or more files or paste text."}), 400
@@ -791,7 +789,7 @@ def rfi_docx(run_id, rfi_no):
     _require_results(run)
     template_path = resolve_template_path()
     if not template_path:
-        return jsonify({"error": "No RFI form is loaded. Drop the project's .docx form into templates_rfi/."}), 400
+        return jsonify({"error": "No RFI form is loaded. Ask an administrator to add the project's .docx form."}), 400
     with _run_lock(run_id):
         run = storage.get_run(run_id)
         results = run["results"]
@@ -817,7 +815,7 @@ def rfi_docx_all(run_id):
     _require_results(run)
     template_path = resolve_template_path()
     if not template_path:
-        return jsonify({"error": "No RFI form is loaded. Drop the project's .docx form into templates_rfi/."}), 400
+        return jsonify({"error": "No RFI form is loaded. Ask an administrator to add the project's .docx form."}), 400
     errors = []
     with _run_lock(run_id):
         run = storage.get_run(run_id)
@@ -949,6 +947,7 @@ def health_check():
 
 
 @app.route("/api/rfi-template", methods=["GET"])
+@login_required
 def rfi_template_status():
     """Report which RFI form is in use and which tokens it contains."""
     path = resolve_template_path()
@@ -956,8 +955,8 @@ def rfi_template_status():
         return jsonify({
             "loaded": False,
             "message": (
-                "No RFI form found. Drop the project's .docx RFI form into "
-                "templates_rfi/ (placeholders written as {{token}})."
+                "No RFI form found. An administrator can add the project's .docx RFI form "
+                "(placeholders written as {{token}})."
             ),
         })
     try:
@@ -971,185 +970,6 @@ def rfi_template_status():
         "filename": os.path.basename(path),
         "tokens": tokens,
     })
-
-
-# ---------------------------------------------------------------------------
-# Legacy single-shot endpoints (scripts / older clients)
-# ---------------------------------------------------------------------------
-
-def _save_upload(storage_obj, scan_dir: str, filename: str) -> str:
-    saved_path = os.path.join(scan_dir, f"{uuid.uuid4().hex[:8]}_{filename}")
-    storage_obj.save(saved_path)
-    return saved_path
-
-
-def _requested_kinds(slot: str, count: int) -> list:
-    """Per-file kind chosen in the UI ('auto' | 'document' | 'drawing'), aligned with the upload order."""
-    try:
-        kinds = json.loads(request.form.get(f"document_{slot}_file_kinds") or "[]")
-    except ValueError:
-        kinds = []
-    kinds = [k if k in KIND_CHOICES else "auto" for k in kinds]
-    return (kinds + ["auto"] * count)[:count]
-
-
-def _resolve_set(slot: str, scan_dir: str):
-    """
-    Read one side of the comparison from a legacy /scan request.
-
-    Fields: document_{slot}_files (multiple), document_{slot}_file_kinds (JSON
-    list aligned with the files), document_{slot}_text. Older single-file
-    fields (document_{slot}_file, _is_drawing, _drawing_pdf / _dxf) still work.
-    """
-    uploads = [f for f in request.files.getlist(f"document_{slot}_files") if f and f.filename]
-    kinds = _requested_kinds(slot, len(uploads))
-
-    legacy_drawing = (request.form.get(f"document_{slot}_is_drawing") or "").lower() in ("1", "true", "on", "yes")
-    for field in ("file", "drawing_pdf", "drawing_dxf"):
-        storage_obj = request.files.get(f"document_{slot}_{field}")
-        if storage_obj and storage_obj.filename:
-            uploads.append(storage_obj)
-            kinds.append("drawing" if (legacy_drawing or field != "file") else "document")
-
-    if len(uploads) > MAX_FILES_PER_SET:
-        return [], f"Document set {slot.upper()} has {len(uploads)} files; the limit is {MAX_FILES_PER_SET}."
-
-    files = []
-    for storage_obj, kind in zip(uploads, kinds):
-        filename = secure_filename(storage_obj.filename) or f"file_{uuid.uuid4().hex[:6]}"
-        err = _validate_upload(filename, kind, slot)
-        if err:
-            return [], f"{err} (document set {slot.upper()})"
-        path = _save_upload(storage_obj, scan_dir, filename)
-        if kind == "auto":
-            kind, reason = classify_file(path)
-        else:
-            reason = "chosen by the user"
-        print(f"[api] set {slot.upper()}: {filename} -> {kind} ({reason})")
-        files.append({"name": filename, "path": path, "kind": kind, "classified_as": reason})
-
-    pasted = (request.form.get(f"document_{slot}_text") or "").strip()
-    if pasted:
-        files.append({"name": "pasted text", "kind": "text", "text": pasted, "classified_as": "pasted"})
-
-    return pair_drawing_files(files), None
-
-
-@app.route("/scan", methods=["POST"])
-def scan():
-    """Legacy: run a conflict scan synchronously and return the results in the response."""
-    scan_dir = os.path.join(UPLOAD_FOLDER, f"scan_{uuid.uuid4().hex}")
-    os.makedirs(scan_dir, exist_ok=True)
-    try:
-        project_name = (request.form.get("project_name") or "").strip()
-        grouping = (request.form.get("rfi_grouping") or "consolidated").strip().lower()
-        if grouping not in ("consolidated", "single"):
-            grouping = "consolidated"
-        user_id = (request.form.get("user_id") or "anonymous").strip()
-        rfi_form_meta = {field: (request.form.get(field) or "").strip() for field in RFI_FORM_META_FIELDS}
-
-        files_a, error_a = _resolve_set("a", scan_dir)
-        files_b, error_b = _resolve_set("b", scan_dir)
-        if error_a or error_b:
-            return jsonify({"error": error_a or error_b}), 400
-        missing = [o for o, files in (("first", files_a), ("second", files_b)) if not files]
-        if missing:
-            return jsonify({"error": "Please provide the " + " and ".join(missing) +
-                                     " document set - upload one or more files or paste text."}), 400
-
-        result_state = run_conflict_scan(
-            user_id=user_id,
-            document_a_text="",
-            document_b_text="",
-            document_a_label=(request.form.get("document_a_label") or "").strip() or "Document A",
-            document_b_label=(request.form.get("document_b_label") or "").strip() or "Document B",
-            document_a_files=files_a,
-            document_b_files=files_b,
-            project_name=project_name or "Unnamed Project",
-            review_focus=(request.form.get("review_focus") or "").strip(),
-            document_precedence=(request.form.get("document_precedence") or "").strip(),
-            rfi_grouping=grouping,
-            rfi_form_meta=rfi_form_meta,
-            export_format="excel",
-        )
-        if result_state.get("error_message"):
-            return jsonify({"error": result_state["error_message"]}), 400
-
-        discrepancies = result_state.get("discrepancies", [])
-        rfi_items = result_state.get("rfi_items", [])
-        event_id = str(uuid.uuid4())
-        with session_lock:
-            active_sessions[event_id] = {
-                "user_id": user_id,
-                "project_name": project_name,
-                "document_a_label": result_state.get("document_a_label"),
-                "document_b_label": result_state.get("document_b_label"),
-                "rfi_form_meta": rfi_form_meta,
-                "timestamp": datetime.now().isoformat(),
-            }
-        register_path = result_state.get("register_path")
-        return jsonify({
-            "event_id": event_id,
-            "project_name": project_name,
-            "document_a": jobs.set_summary(result_state, "a", files_a),
-            "document_b": jobs.set_summary(result_state, "b", files_b),
-            "scan_summary": result_state.get("scan_summary", ""),
-            "confidence_level": result_state.get("confidence_level", "medium"),
-            "warnings": result_state.get("analysis_warnings", []),
-            "discrepancies": discrepancies,
-            "issue_classes": {c["key"]: c["title"] for c in issue_classes(detectable_only=False)},
-            "rfi_grouping": grouping,
-            "rfi_items": [
-                {**rfi, "docx_file": os.path.basename(rfi["docx_path"]) if rfi.get("docx_path") else None}
-                for rfi in rfi_items
-            ],
-            "register_file": os.path.basename(register_path) if register_path else None,
-            "steps_executed": result_state.get("step_history", []),
-        })
-    except Exception as exc:
-        traceback.print_exc()
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        shutil.rmtree(scan_dir, ignore_errors=True)
-
-
-@app.route("/api/rfi/export", methods=["POST"])
-def export_edited_rfi():
-    """Legacy: re-generate one RFI .docx from edited fields of a /scan result."""
-    payload = request.get_json(silent=True) or {}
-    rfi = payload.get("rfi") or {}
-    if not rfi.get("rfi_no"):
-        return jsonify({"error": "The RFI payload must include rfi_no."}), 400
-    template_path = resolve_template_path()
-    if not template_path:
-        return jsonify({"error": "No RFI form is loaded. Upload the project's .docx form first."}), 400
-
-    with session_lock:
-        sess = active_sessions.get(payload.get("event_id"), {})
-    state_like = {
-        "project_name": sess.get("project_name") or payload.get("project_name") or "",
-        "user_id": sess.get("user_id") or "",
-        "rfi_form_meta": sess.get("rfi_form_meta") or {},
-    }
-    label_a = sess.get("document_a_label") or payload.get("document_a_label") or "Document A"
-    label_b = sess.get("document_b_label") or payload.get("document_b_label") or "Document B"
-    _rebuild_description(rfi)
-    if isinstance(rfi.get("attachments"), str):
-        rfi["attachments"] = [a.strip() for a in rfi["attachments"].splitlines() if a.strip()]
-    safe_no = secure_filename(str(rfi["rfi_no"])) or "RFI"
-    out_path = os.path.join(EXPORT_FOLDER, f"{safe_no}_{uuid.uuid4().hex[:6]}_edited.docx")
-    try:
-        fill_docx_template(template_path, out_path, build_token_values(rfi, state_like, label_a, label_b))
-    except Exception as exc:
-        traceback.print_exc()
-        return jsonify({"error": f"Could not write the RFI document: {exc}"}), 500
-    return jsonify({"status": "success", "file": os.path.basename(out_path)})
-
-
-@app.route("/exports/<path:filename>")
-def serve_export(filename):
-    """Legacy: serve registers and RFI documents written to exports/."""
-    return send_from_directory(EXPORT_FOLDER, filename, as_attachment=True)
 
 
 _recovered = threading.Event()

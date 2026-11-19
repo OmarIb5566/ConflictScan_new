@@ -33,6 +33,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
+from nodes.run_paths import output_dir, template_dir
 from nodes.rfi_knowledge import closing_for, load_taxonomy, request_type_for, rfi_style_prompt
 
 _llm_client_instance = None
@@ -56,7 +57,7 @@ DEFAULT_RESPONSE_DAYS = 7       # working-day allowance quoted on the form
 MAX_ATTACHMENTS_LISTED = 12
 
 # Where a project RFI form is looked up when the caller does not name one
-DEFAULT_TEMPLATE_DIR = os.path.join(os.getcwd(), "templates_rfi")
+DEFAULT_TEMPLATE_DIR = template_dir()
 DEFAULT_TEMPLATE_NAME = "F-PQP-01-03 Request For Information.docx"
 
 PRIORITY_BY_SEVERITY = {
@@ -610,7 +611,7 @@ def rfi_drafting_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(msg)
     else:
         print(f"[rfi_drafting] Filling form: {template_path}")
-        export_dir = os.path.join(os.getcwd(), "exports")
+        export_dir = output_dir()
         project_fragment = _safe_name(project_name)
 
         try:

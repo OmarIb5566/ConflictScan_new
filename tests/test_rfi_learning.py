@@ -425,34 +425,43 @@ def test_graph_streams_progress_and_can_stop(monkeypatch, tmp_path):
     assert stopped == ["receive_input", "analyze_documents"]
 
 
-def test_api_accepts_multiple_files_per_set(monkeypatch, tmp_path):
-    import io
+def test_scan_writes_only_into_its_own_folders(monkeypatch, tmp_path):
+    """Two scans never share an exports/ or debug_logs/ folder, and nothing lands in the working directory."""
     import nodes.llm_client as llm
+    from graph import run_conflict_scan
     monkeypatch.setattr(llm.llm_client, "run", _fake_llm)
-    import api
-    monkeypatch.setattr(api, "UPLOAD_FOLDER", str(tmp_path))
-    monkeypatch.chdir(tmp_path)            # registers and RFIs are written under the working directory
-    client = api.app.test_client()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    boq = tmp_path / "boq.txt"
+    boq.write_text("Transformer TR4 rating | 1250 kVA | BOQ item 1.2 | TR4\n", encoding="utf-8")
+    sld = tmp_path / "sld.txt"
+    sld.write_text("Transformer TR4 rating | 1000 kVA | SLD-100 | TR4\n", encoding="utf-8")
+    outs = []
+    for n in (1, 2):
+        out = tmp_path / f"scan{n}"
+        state = run_conflict_scan(
+            user_id="test", document_a_text="", document_b_text="",
+            document_a_label="Tender BOQ", document_b_label="IFC Electrical",
+            document_a_files=[{"name": "boq.txt", "path": str(boq), "kind": "document"}],
+            document_b_files=[{"name": "sld.txt", "path": str(sld), "kind": "document"}],
+            project_name="Test", rfi_template_path=os.path.join(ROOT, "templates_rfi", "none.docx"),
+            output_dir=str(out), debug_dir=str(tmp_path / f"debug{n}"),
+        )
+        assert os.path.dirname(state["register_path"]) == str(out)
+        outs.append(state["register_path"])
+    assert outs[0] != outs[1] and all(os.path.exists(p) for p in outs)
+    assert list(cwd.iterdir()) == []
 
-    data = {
-        "document_a_label": "Tender BOQ",
-        "document_b_label": "IFC Electrical",
-        "document_a_files": [(io.BytesIO(b"Transformer TR4 rating | 1250 kVA | BOQ item 1.2 | TR4\n"), "boq.txt")],
-        "document_b_files": [
-            (io.BytesIO(b"Transformer TR4 rating | 1000 kVA | SLD-100 | TR4\n\nTH05 fed from | TR02 | SLD-TR2 | TH05\n"), "sld_tr2.txt"),
-            (io.BytesIO(b"TH05 fed from | TR03 | SLD-TR3 | TH05\n"), "sld_tr3.txt"),
-        ],
-        "document_b_file_kinds": '["document", "auto"]',
-        "rfi_grouping": "single",
-    }
-    resp = client.post("/scan", data=data, content_type="multipart/form-data")
-    body = resp.get_json()
-    assert resp.status_code == 200, body
-    assert body["document_b"]["file_count"] == 2
-    assert len(body["rfi_items"]) == len(body["discrepancies"]) >= 2      # one RFI per finding
-    assert body["issue_classes"]["spatial_clash"]
-    assert not any(p.name.startswith("scan_") for p in tmp_path.iterdir())  # per-scan uploads cleaned up
 
-    bad = client.post("/scan", data={"document_a_files": [(io.BytesIO(b"x"), "plan.dwg")],
-                                     "document_b_text": "x"}, content_type="multipart/form-data")
-    assert bad.status_code == 400 and "DXF" in bad.get_json()["error"]
+def test_run_paths_default_to_temp_and_no_debug(monkeypatch):
+    from nodes import run_paths
+    monkeypatch.delenv("CONFLICTSCAN_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("CONFLICTSCAN_DEBUG_DIR", raising=False)
+    with run_paths.scan_dirs():
+        out = run_paths.output_dir()
+        assert os.path.isdir(out) and not out.startswith(ROOT)
+        assert run_paths.output_dir() == out            # stable within one scan
+        assert run_paths.debug_dir() is None
+    assert run_paths.template_dir() == os.path.join(ROOT, "templates_rfi")
+

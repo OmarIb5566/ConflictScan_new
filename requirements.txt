@@ -7,7 +7,6 @@ langchain-core>=0.1.0
 
 # Web Framework
 flask>=2.3.0
-flask-cors>=4.0.0
 werkzeug>=2.3.0
 
 # Data processing (Excel reading, register export)

@@ -96,15 +96,27 @@ function countsOf(run) {
 // API
 // =====================================================================
 
-async function api(path, { method = "GET", body, form } = {}) {
+// The server hands the page a per-session anti-forgery token in a readable
+// cookie; every state-changing request echoes it back in a header.
+function csrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)cs_csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+async function api(path, { method = "GET", body, form, _retried = false } = {}) {
   const init = { method, headers: {}, credentials: "same-origin" };
+  if (method !== "GET") init.headers["X-CSRF-Token"] = csrfToken();
   if (body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
   if (form) init.body = form;
   let res;
   try { res = await fetch(path, init); } catch { throw new Error("Network error - is the server running?"); }
   let data = null;
   try { data = await res.json(); } catch { /* not JSON */ }
-  if (res.status === 401 && data && data.auth_required) { Auth.expired(); }
+  if (res.status === 403 && data && data.csrf_failed && !_retried) {
+    await fetch("/api/auth/status", { credentials: "same-origin" }).catch(() => {});   // refreshes the token cookie
+    return api(path, { method, body, form, _retried: true });
+  }
+  if (res.status === 401 && data && data.auth_required) { Auth.expired(data.expired); }
   if (!res.ok || (data && data.error)) {
     const err = new Error((data && data.error) || `Request failed (${res.status})`);
     err.status = res.status;
@@ -117,11 +129,12 @@ function uploadFiles(path, form, onProgress) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open("POST", path);
+    x.setRequestHeader("X-CSRF-Token", csrfToken());
     x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let d = {};
       try { d = JSON.parse(x.responseText); } catch { /* ignore */ }
-      if (x.status === 401) { Auth.expired(); return reject(new Error("Please sign in.")); }
+      if (x.status === 401) { Auth.expired(d.expired); return reject(new Error("Please sign in.")); }
       if (x.status >= 400 && !(d.added && d.added.length)) {
         return reject(new Error(d.error || (d.errors || []).join(" ") || `Upload failed (${x.status})`));
       }
@@ -375,11 +388,12 @@ const Auth = {
     else this.setMode(this.mode);
     $('[data-mode="register"]').hidden = !this.status.signup_allowed;
   },
-  expired() {
+  expired(idle) {
     if (!App.me) return;
     App.me = null;
     Jobs.stop();
-    toast("Your session has ended. Sign in again to continue.", { type: "error", timeout: 0 });
+    toast(idle ? "You were signed out after a period of inactivity. Sign in again to continue - your saved work is kept."
+               : "Your session has ended. Sign in again to continue.", { type: "error", timeout: 0 });
     this.show();
   },
   setMode(mode) {
@@ -388,7 +402,10 @@ const Auth = {
     $$("#auth-form [data-register]").forEach((n) => { n.hidden = mode !== "register"; });
     $$("#auth-form [data-login]").forEach((n) => { n.hidden = mode !== "login"; });
     $("#auth-submit").textContent = mode === "login" ? "Sign in" : "Create account";
-    $('#auth-form [name="password"]').autocomplete = mode === "login" ? "current-password" : "new-password";
+    const pw = $('#auth-form [name="password"]');
+    pw.autocomplete = mode === "login" ? "current-password" : "new-password";
+    pw.minLength = mode === "register" ? ((this.status && this.status.min_password) || 8) : 0;
+    pw.placeholder = mode === "register" ? `At least ${pw.minLength} characters` : "";
     $("#auth-error").hidden = true;
   },
   init() {
@@ -1709,10 +1726,15 @@ class RunView {
     ul.innerHTML = files.map((f) => {
       const ext = extOf(f.name);
       const guess = f.detected_kind ? ` (${f.detected_kind})` : "";
-      return `<li data-file="${esc(f.id)}">
+      const facts = [fmtBytes(f.size)];
+      if (f.pages) facts.push(plural(f.pages, ext === "pdf" ? "page" : "frame"));
+      if (f.inspecting) facts.push(`<span class="spinner sm"></span> checking&hellip;`);
+      else if (f.kind === "auto" && f.detected_reason && !f.problem) facts.push(esc(f.detected_reason));
+      return `<li data-file="${esc(f.id)}" class="${f.problem ? "has-problem" : ""}">
         <span class="ext">${esc(ext || "file")}</span>
         <div class="fn"><a href="/api/runs/${esc(this.id)}/files/${esc(f.id)}/download" title="Download ${esc(f.name)}">${esc(f.name)}</a>
-          <div class="sub" title="${esc(f.detected_reason || "")}">${fmtBytes(f.size)}${f.kind === "auto" && f.detected_reason ? ` &middot; ${esc(f.detected_reason)}` : ""}</div></div>
+          <div class="sub" title="${esc(f.detected_reason || "")}">${facts.join(" &middot; ")}</div>
+          ${f.problem ? `<div class="file-problem" role="alert">&#9888; This file ${esc(f.problem)}. Remove it to scan.</div>` : ""}</div>
         <span class="kind-wrap"><select data-kind="${esc(f.id)}" ${locked ? "disabled" : ""} aria-label="How to read this file">
           <option value="auto" ${f.kind === "auto" ? "selected" : ""}>Auto${esc(guess)}</option>
           <option value="document" ${f.kind === "document" ? "selected" : ""} ${DRAWING_ONLY.includes(ext) ? "disabled" : ""}>Document</option>
@@ -1722,6 +1744,23 @@ class RunView {
         <button class="icon-btn sm" data-remove="${esc(f.id)}" title="Remove file">&times;</button>`}
       </li>`;
     }).join("") + (files.length ? "" : `<li style="display:block;text-align:center" class="muted small">No files in this set yet.</li>`);
+    if (files.some((f) => f.inspecting)) this.watchInspection();
+  }
+
+  // Uploaded files are checked in the background (pages, encryption, document vs
+  // drawing); refresh their rows until every check is done.
+  watchInspection() {
+    if (this._inspectTimer) return;
+    this._inspectTimer = setTimeout(async () => {
+      this._inspectTimer = null;
+      if (!this.el.isConnected || this.step !== "documents") return;
+      try {
+        const run = await api(`/api/runs/${this.id}`);
+        const fresh = new Map(run.files.map((f) => [f.id, f]));
+        this.run.files = this.run.files.map((f) => fresh.get(f.id) || f);
+        this.renderFiles("a"); this.renderFiles("b"); this.renderStepper();
+      } catch { /* try again on the next render */ }
+    }, 1200);
   }
 
   async uploadTo(slot, files) {

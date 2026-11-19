@@ -18,6 +18,8 @@ import os
 from datetime import datetime
 from typing import Dict, Any, List
 
+from nodes.run_paths import output_dir
+
 REGISTER_COLUMNS = [
     ("id", "ID"),
     ("severity", "Severity"),
@@ -140,8 +142,7 @@ def export_discrepancy_register(state: Dict[str, Any]) -> Dict[str, Any]:
             "step_history": ["export: skipped (no discrepancies)"],
         }
 
-    export_dir = os.path.join(os.getcwd(), "exports")
-    os.makedirs(export_dir, exist_ok=True)
+    export_dir = output_dir()
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     base = f"{_safe_name(project_name)}_conflict_scan_{stamp}"

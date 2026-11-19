@@ -43,7 +43,13 @@ STAGE_KEYS = [k for k, _ in STAGES]
 LOG_LINES_KEPT = 400
 
 WORKERS = max(1, int(os.environ.get("CONFLICTSCAN_WORKERS", "1")))
+# Per-scan drawing-reader diagnostics (data/runs/<id>/debug); deleted with the run.
+DEBUG_LOGS = os.environ.get("CONFLICTSCAN_DEBUG_LOGS", "1").lower() not in ("0", "false", "no")
 _executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="scan")
+# Uploaded files are opened (page count, encryption, document/drawing guess) here,
+# never inside the upload request.
+_inspector = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inspect")
+_inspect_lock = threading.Lock()
 _cancel_flags: Dict[str, threading.Event] = {}
 _live: Dict[str, Dict[str, Any]] = {}
 _live_lock = threading.Lock()
@@ -177,6 +183,13 @@ def recover_after_restart() -> None:
                                error="The server restarted while this scan was running. Start it again.")
         else:
             submit(run["id"])
+    # Scratch folders of scans the restart interrupted
+    root = _scratch_root()
+    for name in os.listdir(root):
+        shutil.rmtree(os.path.join(root, name), ignore_errors=True)
+    # Uploads whose background check never finished
+    for file_id in storage.uninspected_file_ids():
+        inspect_file_later(file_id)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +214,7 @@ def set_summary(result_state: dict, slot: str, files: list) -> dict:
 
 
 def _move_into(path: Optional[str], dest_dir: str) -> Optional[str]:
-    """Move a file the graph wrote to exports/ into the run's own folder; returns the new basename."""
+    """Move a file the graph wrote into the run's own exports folder; returns the new basename."""
     if not path or not os.path.isfile(path):
         return None
     name = os.path.basename(path)
@@ -239,13 +252,49 @@ def build_results(result_state: Dict[str, Any], files_a: list, files_b: list, ex
     }
 
 
+# ---------------------------------------------------------------------------
+# Upload inspection
+# ---------------------------------------------------------------------------
+
+def inspect_file_now(file_id: str) -> Optional[Dict[str, Any]]:
+    """Run upload_checks.inspect on one stored file and save the outcome; returns the updated record."""
+    import upload_checks
+
+    with _inspect_lock:
+        f = storage.get_run_file(file_id)
+        if not f or f.get("inspected_at"):
+            return f
+    if not os.path.isfile(f["path"]):
+        storage.update_run_file(file_id, problem="is missing from storage - upload it again",
+                                inspected_at=storage.now())
+        return storage.get_run_file(file_id)
+    result = upload_checks.inspect(f["path"], os.path.splitext(f["name"])[1])
+    storage.update_run_file(file_id, inspected_at=storage.now(), **result)
+    return storage.get_run_file(file_id)
+
+
+def inspect_file_later(file_id: str) -> None:
+    def task():
+        try:
+            inspect_file_now(file_id)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+    _inspector.submit(task)
+
+
 def resolve_source_files(run_id: str, work_dir: str, inputs: Dict[str, Any]):
     """The run's stored uploads -> state.SourceFile lists, copied into a scratch folder for the graph."""
     from nodes.file_ingest import classify_file, pair_drawing_files
 
     sets: Dict[str, List[Dict[str, Any]]] = {"a": [], "b": []}
+    problems = []
     for f in storage.list_run_files(run_id):
         if f["slot"] not in sets or not os.path.isfile(f["path"]):
+            continue
+        if not f.get("inspected_at"):
+            f = inspect_file_now(f["id"]) or f
+        if f.get("problem"):
+            problems.append(f"{f['name']} {f['problem']}")
             continue
         work_path = os.path.join(work_dir, os.path.basename(f["path"]))
         shutil.copy2(f["path"], work_path)
@@ -256,6 +305,8 @@ def resolve_source_files(run_id: str, work_dir: str, inputs: Dict[str, Any]):
             kind, reason = classify_file(work_path)
         sets[f["slot"]].append({"name": f["name"], "path": work_path, "kind": kind, "classified_as": reason})
 
+    if problems:
+        raise ValueError("Remove or replace these files and start again: " + "; ".join(problems))
     for slot in ("a", "b"):
         pasted = (inputs.get(f"document_{slot}_text") or "").strip()
         if pasted:
@@ -327,6 +378,8 @@ def _execute(run_id: str) -> None:
             export_format="excel",
             on_node_complete=on_node_complete,
             should_stop=flag.is_set,
+            output_dir=os.path.join(work_dir, "out"),
+            debug_dir=storage.run_dir(run_id, "debug") if DEBUG_LOGS else None,
         )
 
         if result_state.get("error_message"):
@@ -365,7 +418,8 @@ def _execute(run_id: str) -> None:
 
 
 def _scratch_root() -> str:
-    root = os.path.join(os.getcwd(), "uploads")
+    """Temporary per-scan working folders (deleted when the scan ends)."""
+    root = os.environ.get("CONFLICTSCAN_SCRATCH_DIR") or os.path.join(storage.DATA_DIR, "scratch")
     os.makedirs(root, exist_ok=True)
     return root
 

@@ -156,12 +156,45 @@ creates the first account), and all work is saved on the server under
 
 | Setting (environment variable) | Default | Meaning |
 |---|---|---|
-| `CONFLICTSCAN_DATA_DIR` | `./data` | Database, uploads and per-run exports |
+| `CONFLICTSCAN_DATA_DIR` | `data/` next to the code | Database, uploads, per-run exports and debug logs, scan scratch space |
 | `CONFLICTSCAN_WORKERS` | `1` | Scans run at once. Others queue. The local LLM is the bottleneck, so raise this only with more GPU capacity. |
 | `CONFLICTSCAN_ALLOW_SIGNUP` | `1` | `0` = only the very first account can self-register |
 | `CONFLICTSCAN_SECRET_KEY` | generated into `data/secret_key` | Session-cookie signing key. Set it explicitly when you run more than one server process. |
-| `CONFLICTSCAN_MAX_UPLOAD_MB` | `500` | Request size limit |
+| `CONFLICTSCAN_MAX_UPLOAD_MB` | `500` | Request size limit (one upload, all files together) |
+| `CONFLICTSCAN_MAX_FILE_MB` | `200` | Largest single file |
+| `CONFLICTSCAN_MAX_PDF_PAGES` | `400` | Most pages in one PDF (split bigger ones) |
+| `CONFLICTSCAN_MAX_IMAGE_MP` | `200` | Largest image, in megapixels |
+| `CONFLICTSCAN_DEBUG_LOGS` | `1` | Keep the drawing reader's diagnostics per scan (`data/runs/<id>/debug`) |
 | `CONFLICTSCAN_DEBUG` | `1` | `0` for shared use: the debug reloader restarts the server on file changes, which fails any running scan |
+
+### Security
+
+| Setting (environment variable) | Default | Meaning |
+|---|---|---|
+| `CONFLICTSCAN_HTTPS` | `0` | `1` whenever the app is served over HTTPS: cookies are marked Secure and HSTS is sent |
+| `CONFLICTSCAN_ALLOWED_ORIGINS` | empty | Other web origins allowed to call the API with a user's sign-in (comma-separated). Empty = only this app's own pages |
+| `CONFLICTSCAN_IDLE_MINUTES` | `480` | Sign out after this long without activity. Background polling doesn't count |
+| `CONFLICTSCAN_SESSION_DAYS` | `14` | Longest a "Keep me signed in" session lasts |
+| `CONFLICTSCAN_LOGIN_MAX_FAILS` | `5` | Failed sign-ins per username in 15 minutes before it's locked for 15 minutes (4x per client address) |
+| `CONFLICTSCAN_MIN_PASSWORD` | `8` | Minimum password length |
+
+- Every endpoint except `/` and `/api/health` needs a signed-in session.
+- State-changing requests carry an anti-forgery token: the page reads it
+  from the `cs_csrf` cookie and sends it in the `X-CSRF-Token` header.
+  Scripts must do the same.
+- Pages are sent with a strict Content-Security-Policy and are never framed.
+  The app loads nothing from the internet (no CDN, no web fonts).
+- **Uploads are checked twice.**
+  - While uploading, the content must match the extension (a renamed `.exe`
+    is refused) and the file must be within the size limit.
+  - In the background, page count, password protection, unsafe Office/zip
+    files and oversized images are checked.
+  - A file that fails is marked in red and blocks the scan until it's removed.
+  - Files are only ever opened by the background workers, never inside the
+    upload request.
+- Each scan writes into its own folders: a scratch folder deleted when the
+  scan ends, and `data/runs/<id>/exports` and `/debug`. Concurrent scans
+  never share an output folder.
 
 The original single-page steps map onto the stages like this:
 
@@ -210,43 +243,24 @@ Workspace endpoints used by the web app. They need a signed-in session cookie
 | `/api/runs/<id>/exports/<file>`, `/bundle` | GET | Download one output / everything as a .zip |
 | `/api/jobs` | GET | Your queued/running scans and ones that finished recently |
 
-Single-shot endpoints for scripts (no sign-in, nothing stored):
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/` | GET | Web interface |
-| `/api/health` | GET | Health check, including whether an RFI form is loaded |
-| `/scan` | POST | Run a conflict scan over two document sets and wait for the result |
 | `/api/rfi-template` | GET | Which RFI form is in use, and its `{{tokens}}` |
-| `/api/rfi/export` | POST | Regenerate one RFI `.docx` from edited fields |
-| `/exports/<filename>` | GET | Download a register or an RFI document |
+| `/` | GET | Web interface (no sign-in) |
+| `/api/health` | GET | Health check (no sign-in) |
 
-### `/scan` form fields
+The old unauthenticated single-shot endpoints (`/scan`, `/api/rfi/export`,
+`/exports/<file>`) were removed: they let anyone on the network run scans and
+download outputs. Scripts use the workspace endpoints instead:
 
-| Field | Notes |
-|---|---|
-| `document_a_files` | One or more files (repeat the field) |
-| `document_a_file_kinds` | Optional JSON list aligned with the files: `"auto"`, `"document"` or `"drawing"` |
-| `document_a_text` | Optional pasted text, added to the set |
-| `document_a_label` | Stage label, e.g. `Tender BOQ + Specs` |
-| `document_b_*` | Same four fields for the second set |
-| `project_name`, `review_focus` | Optional |
-| `document_precedence` | Optional contract order of precedence |
-| `rfi_grouping` | `consolidated` (default) or `single` |
-| `user_id` | Optional; recorded as the RFI originator |
+1. Create a project with `POST /api/projects`.
+2. Upload files with `POST /api/runs/<id>/files`.
+3. Start the scan with `POST /api/runs/<id>/start`.
+4. Poll `/api/runs/<id>/progress` until the scan finishes.
 
-The single-file fields of earlier versions (`document_a_file`,
-`document_a_is_drawing`, `document_a_drawing_pdf` / `_dxf`) are still accepted.
+A script signs in with `POST /api/auth/login` and sends `X-CSRF-Token` with
+every request.
 
-```bash
-curl -X POST http://localhost:5000/scan \
-  -F "project_name=Borg El Arab" \
-  -F "document_a_label=Tender BOQ + Specs" \
-  -F "document_a_files=@trial/trial_boq.pdf" \
-  -F "document_a_files=@trial/trial_specs.pdf" \
-  -F "document_b_label=IFC Drawings" \
-  -F "document_b_files=@trial/20240822-SED-B01-100%TD-Rev02.pdf"
-```
+To call the pipeline directly from Python, without the web app, use
+`graph.run_conflict_scan(..., output_dir=..., debug_dir=...)`.
 
 ## Project structure
 
@@ -254,7 +268,9 @@ curl -X POST http://localhost:5000/scan \
 ConflictScan_RFI_automation/
 ├── api.py                    # Flask API: accounts, projects, runs, result editing
 ├── storage.py                # SQLite store: users, prefs, projects, runs, run files
-├── jobs.py                   # background scan queue, live progress, cancel
+├── jobs.py                   # background scan queue, live progress, cancel, upload checks
+├── security.py               # same-origin, CSRF, session timeout, sign-in throttling, headers
+├── upload_checks.py          # file type sniffing, size/page limits, unsafe-file detection
 ├── graph.py                  # LangGraph builder + run_conflict_scan()
 ├── state.py                  # ConflictScanState, SourceFile, Discrepancy, RFIItem
 ├── edges.py                  # Conditional-edge routers
@@ -277,18 +293,20 @@ ConflictScan_RFI_automation/
 │   ├── rfi_drafting.py       # group findings -> draft RFIs -> filled .docx
 │   ├── docx_template.py      # {{token}} substitution that survives Word run splits
 │   ├── export.py             # discrepancy register + RFI log (xlsx, CSV fallback)
+│   ├── run_paths.py          # per-scan output / debug folders
 │   ├── llm_client.py         # Ollama text client
 │   └── vision_client.py      # Ollama vision client + OCR
 │
 ├── templates/index.html      # Web interface shell
 ├── static/app.js, app.css    # Web interface (no build step)
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
-├── data/                     # conflictscan.db + runs/<run>/inputs|exports (git-ignored)
-├── exports/                  # Outputs of the single-shot /scan endpoint
-└── uploads/                  # Per-scan scratch space (deleted after each scan)
+└── data/                     # conflictscan.db, runs/<run>/inputs|exports|debug, scratch/ (git-ignored)
 ```
 
 ## Outputs
+
+All outputs are per revision, in `data/runs/<run>/` (download them from the
+web app, one by one or as a zip).
 
 - `exports/<project>_conflict_scan_<timestamp>.xlsx` — two sheets:
   *Discrepancy Register* (issue class, scope, location, all sources quoted,
@@ -298,8 +316,8 @@ ConflictScan_RFI_automation/
 - `exports/<project>_RFI-00n_<subject>.docx` — one file per RFI.
 - `exports/RFI-00n_edited.docx` — written when an RFI is edited in the browser
   and regenerated, leaving the original draft intact.
-- `debug_logs/drawing_*.json` — everything the drawing reader extracted, per
-  drawing file.
+- `debug/drawing_*.json` — everything the drawing reader extracted, per
+  drawing file (turn off with `CONFLICTSCAN_DEBUG_LOGS=0`).
 
 ## Extending the knowledge base
 
