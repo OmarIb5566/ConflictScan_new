@@ -270,6 +270,43 @@ Every RFI that leaves the company goes through the project's **RFI log**
 - **Existing logs.** *Import existing log* reads a project's current Excel
   log, so numbering continues after it and its RFIs become searchable.
 
+## Working together, and everyday conveniences
+
+- **Comments** on findings, RFIs and RFI-log entries. `@username` notifies a
+  colleague.
+- **Assignment.** Findings and RFIs can be assigned, one at a time or in bulk.
+- **Notification bell**, in-app only (no email). It tells you about:
+  - scans that finished or failed;
+  - things assigned to you, and mentions;
+  - RFIs waiting for your review, and overdue RFIs (checked daily).
+- **Activity.** Each project shows who did what, taken from the audit log.
+- **Evidence viewer.** *view in document* opens the source page with the
+  quoted words highlighted; Word, Excel and text files open at the quote.
+- **Bulk triage.** Tick findings to accept, dismiss, reopen or assign them
+  together.
+- **Saved views.** A named set of findings filters can be saved per person.
+- **Full-text search.** Ctrl+K searches findings, RFIs, the RFI log and
+  comments, not only names.
+- **Trash.** Deleted projects, revisions and RFIs can be restored for 30
+  days (`retention.trash_days`).
+- **Uploads:**
+  - Drag in whole folders or .zip archives; they are unpacked safely and
+    unsupported files are skipped.
+  - Files over 20 MB upload in resumable 8 MB pieces.
+  - File thumbnails are shown.
+- **Scan time estimate.** Shown before a scan starts, from this server's
+  recent scans.
+- **Usage dashboard** (Admin → Usage): scans, pages and model minutes per
+  person and project. An optional fair-use limit
+  (`scans.daily_page_limit`) caps pages per person per day; admins are exempt.
+- **New project from an existing one.** Its header, numbering and form
+  settings are copied.
+- **Help.** A help page, a first-run guided tour, and *What's new* after each
+  upgrade.
+- **Printing.** Print views for findings and RFIs.
+- **Arabic interface** (account menu → Language), laid out right to left.
+  Fixed labels are translated; text built from your data stays as written.
+
 ## AI fleet: several local models, each on the job it does best
 
 Every model call goes through `fleet/`. A **profile** in `config/fleet.toml`
@@ -476,6 +513,7 @@ ConflictScan_RFI_automation/
 ├── revisions.py              # carry-forward, revision comparison, file supersession/history
 ├── project_settings.py       # project settings, house numbering, the project's RFI form
 ├── rfi_log.py                # project RFI log: lifecycle, responses, PDF/Word/Excel, import
+├── collab.py                 # comments, notifications, activity, trash, search, usage, evidence, uploads
 ├── bench/run.py              # accuracy/speed benchmark on real past RFIs
 ├── config/fleet.toml         # role -> model profiles (baseline / workstation / a100)
 ├── jobs.py                   # database job queue, workers, live progress, retries, upload checks
@@ -516,6 +554,8 @@ ConflictScan_RFI_automation/
 ├── static/admin.js           # admin console
 ├── static/project_extras.js  # project settings dialog, document history
 ├── static/rfilog.js          # RFI log view
+├── static/collab.js          # bell, comments, evidence viewer, trash, usage, saved views
+├── static/help.js, i18n.js   # help, tour, what's new; Arabic right-to-left interface
 ├── config/reference_data.json  # local stand-in for the company project register
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
 └── data/                     # conflictscan.db, runs/<run>/inputs|exports|debug, scratch/ (git-ignored)

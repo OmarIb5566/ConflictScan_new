@@ -8,7 +8,7 @@
 (() => {
 const { $, $$, esc, el, api, toast, toastError, modal, confirmDialog, timeEl, fmtDate, avatar, ROLE_LABEL, isAdmin, WS, App } = window.CS;
 
-const SECTIONS = [["users", "Users"], ["queue", "Scan queue"], ["fleet", "AI fleet"], ["health", "System health"], ["audit", "Audit log"], ["settings", "Settings"]];
+const SECTIONS = [["users", "Users"], ["queue", "Scan queue"], ["fleet", "AI fleet"], ["health", "System health"], ["usage", "Usage"], ["audit", "Audit log"], ["settings", "Settings"]];
 const ROLE_HELP = {
   page_triage: "Is a scanned page a drawing or a document?", ocr: "Reads scanned pages",
   drawing_overview: "Title block, system and grids of each sheet", drawing_reader: "Reads values off each drawing tile",
@@ -188,6 +188,9 @@ class AdminView {
       <p class="hint">ConflictScan ${esc(h.version)} &middot; refreshes every 15 seconds.</p>`;
   }
 
+  // ---- usage ------------------------------------------------------------
+  async html_usage() { return window.CS.usageHtml(this.usageDays || 30); }
+
   // ---- audit ------------------------------------------------------------
   async html_audit() {
     const q = new URLSearchParams();
@@ -284,6 +287,7 @@ document.addEventListener("change", async (e) => {
     try { await api("/api/admin/fleet", { method: "PUT", body: { roles: { [roleInput.dataset.fleetRole]: roleInput.value.trim() } } }); toast("Model assignment saved", { type: "success", timeout: 1500 }); view.renderBody(true); }
     catch (err) { toastError(err); view.renderBody(true); }
   }
+  if (e.target.closest("[data-usage-days]")) { view.usageDays = +e.target.value; view.renderBody(true); }
   if (e.target.closest("[data-audit-action]")) { view.auditFilter.action = e.target.value; view.renderBody(true); }
   if (e.target.closest("[data-audit-user]")) { view.auditFilter.user = e.target.value; view.renderBody(true); }
 });

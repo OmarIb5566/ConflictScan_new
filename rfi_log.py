@@ -278,6 +278,12 @@ def register(app):
             return {"results": r["results"]}
 
         mutate_run(run_id, change, request.user["id"])
+        if status != "draft":
+            for hook in STATUS_HOOKS:
+                try:
+                    hook(entry, {**entry, "status": "draft"}, request.user)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[rfi_log] hook failed: {exc}")
         audit("rfi_log.register", "rfi_log", entry["id"], project["id"], f"{entry['log_no']} from Rev {run['seq']} {rfi_no}")
         return jsonify(_payload(entry, _users())), 201
 

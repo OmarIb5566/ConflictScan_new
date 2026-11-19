@@ -277,6 +277,55 @@ window.addEventListener("resize", closeMenus);
 // Autosave
 // =====================================================================
 
+const BIG_FILE = 20 * 1024 * 1024;
+
+// Whole folders dragged in: walk them (files in sub-folders included).
+async function filesFromDrop(dt) {
+  const items = [...(dt.items || [])].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!items.length || items.every((e) => e.isFile)) return [...dt.files];
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      out.push(prefix ? new File([f], `${prefix}_${f.name}`, { type: f.type }) : f);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const e of batch) await walk(e, prefix ? `${prefix}_${entry.name}` : entry.name);
+      } while (batch.length);
+    }
+  };
+  for (const e of items) await walk(e, "");
+  return out.filter((f) => !/^\.|~\$/.test(f.name.split("_").pop()));
+}
+
+// Large files: 8 MB chunks; a dropped connection resumes from the server's byte count.
+async function chunkedUpload(runId, slot, file, onProgress) {
+  const s = await api("/api/uploads", { method: "POST", body: { run_id: runId, slot, name: file.name, size: file.size } });
+  const size = s.chunk_size || 8 * 1024 * 1024;
+  let offset = 0;
+  let failures = 0;
+  while (offset < file.size) {
+    try {
+      const res = await fetch(`/api/uploads/${s.id}?offset=${offset}`, { method: "PUT", credentials: "same-origin",
+        headers: { "X-CSRF-Token": csrfToken() }, body: file.slice(offset, offset + size) });
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 409 && d.received != null) { offset = d.received; continue; }
+      if (!res.ok) throw new Error(d.error || `Upload failed (${res.status})`);
+      offset = d.received;
+      failures = 0;
+      onProgress(offset / file.size);
+    } catch (err) {
+      if (++failures > 6) { await api(`/api/uploads/${s.id}`, { method: "DELETE" }).catch(() => {}); throw err; }
+      await new Promise((r) => setTimeout(r, 1500 * failures));
+      try { offset = (await api(`/api/uploads/${s.id}`)).received; } catch { /* retry */ }
+    }
+  }
+  return api(`/api/uploads/${s.id}/complete`, { method: "POST" });
+}
+
 class Saver {
   constructor(send, { delay = 700, onState } = {}) {
     this.send = send; this.delay = delay; this.onState = onState || (() => {});
@@ -916,6 +965,25 @@ const Palette = {
     bodyEl.style.padding = "0";
     const input = bodyEl.querySelector("[data-q]");
     const list = bodyEl.querySelector("[data-list]");
+    let found = [];
+    let lastQ = "";
+    const searchContent = debounce(async (q) => {
+      if (q.length < 3) { found = []; return; }
+      try {
+        const hits = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20`);
+        if (input.value.trim().toLowerCase() !== q) return;
+        found = hits.filter((h) => h.type !== "project").map((h) => ({
+          k: { finding: "Finding", rfi: "RFI", rfi_log: "RFI log", revision: "Revision", comment: "Comment" }[h.type] || h.type,
+          t: h.title, sub: h.sub, hay: input.value,
+          run: () => {
+            if (h.type === "rfi_log") { window.CS.openRfiLogEntry(h.project_id, h.entry); return; }
+            location.hash = h.link;
+            if (h.type === "rfi" && h.run_id) setTimeout(() => { const v = WS.views.get(`run:${h.run_id}`); if (v && v.selectRfi) v.selectRfi(h.rfi); }, 600);
+          },
+        }));
+        render();
+      } catch { /* search is optional */ }
+    }, 250);
     const render = () => {
       const q = input.value.toLowerCase().trim();
       const terms = q.split(/\s+/).filter(Boolean);
@@ -924,7 +992,9 @@ const Palette = {
         ["Projects", projects.filter(match).slice(0, q ? 12 : 6)],
         ["Scans", runs.filter(match).slice(0, q ? 25 : 6)],
         ["Actions", actions.filter(match)],
+        ["In findings, RFIs and comments", q.length >= 3 ? found : []],
       ];
+      if (q !== lastQ) { lastQ = q; found = []; if (q.length >= 3) searchContent(q); }
       shown = [];
       list.innerHTML = groups.filter(([, items]) => items.length).map(([g, items]) =>
         `<div class="palette-group">${g}</div>` + items.map((it) => {
@@ -1052,7 +1122,10 @@ function newProjectDialog() {
         <datalist id="ref-projects"></datalist></label>
       <div class="hint" data-ref-hint></div>
       <label class="field"><span>Description (optional)</span><textarea name="description" rows="2" placeholder="Scope, client, anything the team should know"></textarea></label>
-      <label class="field"><span>Who can see it</span><select name="visibility"><option value="team">The whole team</option><option value="private">Only me and the members I add</option></select></label>`,
+      <label class="field"><span>Who can see it</span><select name="visibility"><option value="team">The whole team</option><option value="private">Only me and the members I add</option></select></label>
+      <label class="field"><span>Copy settings from (optional)</span><select name="copy_from"><option value="">Start fresh</option>
+        ${App.projects.filter((p) => !p.archived).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+      <div class="hint">Copies the RFI header details, set names, numbering format and RFI form choice - not files or results.</div>`,
     onOpen: (b) => bindReferenceLookup(b),
     actions: [{ label: "Cancel" }, {
       label: "Create project", primary: true,
@@ -1061,7 +1134,7 @@ function newProjectDialog() {
         if (!name) throw new Error("Give the project a name.");
         const r = await api("/api/projects", { method: "POST", body: {
           name, description: b.querySelector("[name=description]").value, visibility: b.querySelector("[name=visibility]").value, create_run: false,
-          reference: refPick(b, name),
+          reference: refPick(b, name), copy_settings_from: b.querySelector("[name=copy_from]").value || undefined,
         } });
         await refreshProjects();
         WS.open("project", r.project.id);
@@ -1589,6 +1662,9 @@ class RunView {
     this.step = null;
     this.filters = { q: "", sev: new Set(SEVERITIES), status: "all", scope: "all", cls: "all", sort: "found" };
     this.expanded = new Set();
+    this.selected = new Set();
+    this.commentCounts = {};
+    this.users = null;
     this.focusId = null;
     this.selectedRfi = null;
     this.rfiQuery = "";
@@ -1902,7 +1978,7 @@ class RunView {
       input.addEventListener("change", () => { this.uploadTo(slot, [...input.files]); input.value = ""; });
       drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
       drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-      drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); this.uploadTo(slot, [...e.dataTransfer.files]); });
+      drop.addEventListener("drop", async (e) => { e.preventDefault(); drop.classList.remove("over"); this.uploadTo(slot, await filesFromDrop(e.dataTransfer)); });
       $(".slot-name", card).addEventListener("input", (e) => {
         this.inputs()[`document_${slot}_label`] = e.target.value;
         this.inputSaver.schedule({ [`document_${slot}_label`]: e.target.value });
@@ -1951,8 +2027,9 @@ class RunView {
       if (f.pages) facts.push(plural(f.pages, ext === "pdf" ? "page" : "frame"));
       if (f.inspecting) facts.push(`<span class="spinner sm"></span> checking&hellip;`);
       else if (f.kind === "auto" && f.detected_reason && !f.problem) facts.push(esc(f.detected_reason));
+      const thumb = !f.inspecting && !f.problem && ["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"].includes(ext);
       return `<li data-file="${esc(f.id)}" class="${f.problem ? "has-problem" : ""}">
-        <span class="ext">${esc(ext || "file")}</span>
+        <span class="ext ${thumb ? "has-thumb" : ""}">${thumb ? `<img class="thumb" loading="lazy" alt="" src="/api/runs/${esc(this.id)}/files/${esc(f.id)}/thumb.png">` : ""}<span>${esc(ext || "file")}</span></span>
         <div class="fn"><a href="/api/runs/${esc(this.id)}/files/${esc(f.id)}/download" title="Download ${esc(f.name)}">${esc(f.name)}</a>
           <div class="sub" title="${esc(f.detected_reason || "")}">${facts.join(" &middot; ")}</div>
           ${f.problem ? `<div class="file-problem" role="alert">&#9888; This file ${esc(f.problem)}. Remove it to scan.</div>` : ""}
@@ -1970,6 +2047,7 @@ class RunView {
         <button class="icon-btn sm" data-remove="${esc(f.id)}" title="Remove file">&times;</button>`}
       </li>`;
     }).join("") + (files.length ? "" : `<li style="display:block;text-align:center" class="muted small">No files in this set yet.</li>`);
+    $$("img.thumb", ul).forEach((img) => img.addEventListener("error", () => { img.parentElement.classList.remove("has-thumb"); img.remove(); }));
     if (files.some((f) => f.inspecting)) this.watchInspection();
   }
 
@@ -1990,6 +2068,13 @@ class RunView {
   }
 
   async uploadTo(slot, files) {
+    if (!files.length) return;
+    // .zip archives are unpacked on the server; big files go up in resumable chunks
+    const zips = files.filter((f) => /\.zip$/i.test(f.name));
+    const big = files.filter((f) => !zips.includes(f) && f.size > BIG_FILE);
+    files = files.filter((f) => !zips.includes(f) && !big.includes(f));
+    for (const z of zips) await this.uploadSpecial(slot, z, "zip");
+    for (const b of big) await this.uploadSpecial(slot, b, "chunked");
     if (!files.length) return;
     const existing = new Set(this.run.files.filter((f) => f.slot === slot).map((f) => `${f.name}|${f.size}`));
     const fresh = files.filter((f) => !existing.has(`${f.name.replace(/[^\w.-]+/g, "_")}|${f.size}`) && !existing.has(`${f.name}|${f.size}`));
@@ -2063,6 +2148,32 @@ class RunView {
     });
   }
 
+  async uploadSpecial(slot, file, how) {
+    const ul = $(`[data-files="${slot}"]`, this.el);
+    const ph = el(`<li class="uploading"><span class="spinner"></span><div class="fn"><span class="nm">${esc(file.name)}</span>
+      <div class="sub">${how === "zip" ? "Unpacking archive&hellip;" : `${fmtBytes(file.size)} - resumable upload`}</div></div><span></span><span></span><span></span><div class="bar"><div></div></div></li>`);
+    ul.appendChild(ph);
+    const progress = (p) => { ph.querySelector(".bar > div").style.width = `${Math.round(p * 100)}%`; };
+    try {
+      let res;
+      if (how === "zip" && file.size <= BIG_FILE) {
+        const fd = new FormData();
+        fd.append("slot", slot);
+        fd.append("file", file);
+        res = await uploadFiles(`/api/runs/${this.id}/zip`, fd, progress);
+      } else {
+        res = await chunkedUpload(this.id, slot, file, progress);
+      }
+      this.run.files.push(...(res.added || []));
+      if ((res.errors || []).length) toast(res.errors.join(" "), { type: "error", timeout: 9000 });
+      if (how === "zip") toast(`${plural((res.added || []).length, "file")} unpacked from ${file.name}${res.skipped ? ` (${res.skipped} unsupported skipped)` : ""}`, { type: "success" });
+      if (this.run.status !== "draft") { this.run.status = "draft"; this.renderHead(); }
+    } catch (err) { toastError(err); }
+    ph.remove();
+    this.renderFiles(slot);
+    this.renderStepper();
+  }
+
   async patchFile(fileId, body) {
     try {
       const f = await api(`/api/runs/${this.id}/files/${fileId}`, { method: "PATCH", body });
@@ -2120,12 +2231,17 @@ class RunView {
           <span class="grow">${i.html}</span></li>`).join("")}</ul>
         <div class="row wrap" style="margin-top:16px;gap:14px">
           <button class="btn primary lg" data-act="start" ${blocked ? "disabled" : ""}>${r.status === "draft" ? "Run conflict scan" : "Run the scan again"}</button>
-          <span class="hint">or press <kbd>Ctrl</kbd> <kbd>Enter</kbd>. The scan runs on the server &mdash; you can close this tab or keep working, and you'll be notified when it finishes.</span>
+          <span class="hint">or press <kbd>Ctrl</kbd> <kbd>Enter</kbd>. The scan runs on the server &mdash; you can close this tab or keep working, and you'll be notified when it finishes.
+            <span data-eta></span></span>
         </div>
       </section>
       <div class="step-nav"><button class="btn ghost" data-step="documents">&larr; Documents</button><span></span></div>`;
     body.addEventListener("input", (e) => this.onInputField(e));
     body.addEventListener("change", (e) => this.onInputField(e));
+    api(`/api/runs/${this.id}/eta`).then((eta) => {
+      const n = $("[data-eta]", body);
+      if (n) n.innerHTML = `<br>Estimated time: <strong>about ${fmtDuration(eta.seconds)}</strong> for ${plural(eta.pages, "page")}${eta.based_on >= 3 ? ` (from the last ${eta.based_on} scans on this server)` : ""}.`;
+    }).catch(() => {});
   }
 
   onInputField(e) {
@@ -2318,6 +2434,11 @@ class RunView {
       <div class="filters">
         <div class="search-box" style="max-width:280px"><input type="search" data-fq value="${esc(f.q)}" placeholder="Search findings (/)"></div>
         <span data-sevchips></span>
+        ${window.CS && window.CS.Views ? `<select data-views aria-label="Saved views"><option value="">Saved views&hellip;</option>
+          ${window.CS.Views.list().map((v) => `<option value="${esc(v.name)}">${esc(v.name)}</option>`).join("")}
+          ${window.CS.Views.list().length ? `<optgroup label="Delete">${window.CS.Views.list().map((v) => `<option value="del:${esc(v.name)}">Delete "${esc(v.name)}"</option>`).join("")}</optgroup>` : ""}</select>
+          <button class="btn sm ghost" data-save-view title="Save these filters as a named view">Save view</button>
+          <button class="btn sm ghost" data-print title="Print the findings shown">Print</button>` : ""}
         <select data-fstatus aria-label="Status filter">
           ${[["all", "Any status"], ["open", "Open"], ["accepted", "Accepted"], ["dismissed", "Dismissed"], ["disputed", "Disputed by second opinion"]].map(([v, l]) => `<option value="${v}" ${f.status === v ? "selected" : ""}>${l}</option>`).join("")}
         </select>
@@ -2342,6 +2463,19 @@ class RunView {
     q.addEventListener("input", debounce(() => { f.q = q.value; this.renderFindingList(); }, 150));
     const bindSel = (sel, key) => { const s = $(sel, body); if (s) s.addEventListener("change", () => { f[key] = s.value; this.renderFindingList(); }); };
     bindSel("[data-fstatus]", "status"); bindSel("[data-fscope]", "scope"); bindSel("[data-fcls]", "cls"); bindSel("[data-fsort]", "sort");
+    body.addEventListener("change", (e) => {
+      const as = e.target.closest("[data-assign]");
+      if (as) this.setFinding(as.dataset.assign, { assignee: as.value || null });
+      const ba = e.target.closest("[data-bulk-assign]");
+      if (ba && ba.value) this.bulk({ assignee: ba.value });
+      const vw = e.target.closest("[data-views]");
+      if (vw && vw.value) {
+        if (vw.value.startsWith("del:")) { window.CS.Views.remove(vw.value.slice(4)); this.renderStep(); return; }
+        const v = window.CS.Views.list().find((x) => x.name === vw.value);
+        if (v) { this.filters = { ...this.filters, ...v.filters, sev: new Set(v.filters.sev) }; this.renderStep(); }
+      }
+    });
+    this.loadSide();
     const list = $("[data-flist]", body);
     list.addEventListener("input", (e) => {
       const t = e.target.closest("[data-note]");
@@ -2411,9 +2545,43 @@ class RunView {
     this.renderSevChips(base);
     $("[data-fcount]", this.el).textContent = list.length === total ? plural(total, "finding") : `Showing ${list.length} of ${total}`;
     const rfiMap = this.rfiByFinding();
-    wrap.innerHTML = this.changesBanner() + (list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
+    wrap.innerHTML = this.bulkBar() + this.changesBanner() + (list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
       : `<div class="card empty"><h3>No findings match these filters</h3><button class="btn" data-act="reset-filters">Clear filters</button></div>`);
     requestAnimationFrame(() => $$("textarea", wrap).forEach(autoGrow));
+    if (window.CS.mountComments) {
+      $$("[data-comments-for]", wrap).forEach((box) => window.CS.mountComments(box, { run_id: this.id, target_type: "finding", target_id: box.dataset.commentsFor }));
+    }
+  }
+
+  userName(id) { const u = (this.users || []).find((x) => x.id === id); return u ? u.display_name : "someone"; }
+
+  async loadSide() {
+    // people to assign, comment counts - fetched once per visit of the findings step
+    try {
+      [this.users, this.commentCounts] = await Promise.all([this.users ? this.users : api("/api/users"), api(`/api/runs/${this.id}/comment-counts`)]);
+      if (this.step === "findings") this.renderFindingList();
+    } catch { /* optional */ }
+  }
+
+  bulkBar() {
+    if (!this.selected.size) return "";
+    return `<div class="bulk-bar"><strong>${this.selected.size} selected</strong>
+      <button class="btn sm" data-bulk="accepted">Accept</button><button class="btn sm" data-bulk="dismissed">Dismiss</button>
+      <button class="btn sm" data-bulk="open">Reopen</button>
+      <select data-bulk-assign><option value="">Assign to&hellip;</option>${(this.users || []).map((u) => `<option value="${esc(u.id)}">${esc(u.display_name)}</option>`).join("")}</select>
+      <span class="grow"></span><button class="btn sm ghost" data-bulk-all>Select all shown</button><button class="btn sm ghost" data-bulk-clear>Clear</button></div>`;
+  }
+
+  async bulk(body) {
+    try {
+      const r = await api(`/api/runs/${this.id}/findings`, { method: "PATCH", body: { ids: [...this.selected], ...body } });
+      this.run.review = r.review;
+      toast(`${this.selected.size} finding(s) updated`, { type: "success", timeout: 2000 });
+      this.selected.clear();
+      this.renderStepper();
+      this.renderFindingList();
+      refreshSoon();
+    } catch (err) { toastError(err); }
   }
 
   findingHtml(d, rfiMap) {
@@ -2432,7 +2600,8 @@ class RunView {
     };
     const ref = (e) => {
       const where = [e.file, e.reference].filter(Boolean).join(" · ");
-      return (where ? `<div class="ref">${esc(where)}</div>` : "") + (e.low_confidence ? `<div class="ref verify-note">verify - OCR / partly legible</div>` : "");
+      const view = e.file ? ` <button class="link-btn small" data-ev="${esc(e.file)}" data-evq="${esc(e.says || "")}" data-evr="${esc(e.reference || "")}" title="Open the source page with these words highlighted">view in document</button>` : "";
+      return (where ? `<div class="ref">${esc(where)}${view}</div>` : "") + (e.low_confidence ? `<div class="ref verify-note">verify - OCR / partly legible</div>` : "");
     };
     let cols;
     if (evidence.length && (d.scope === "within_a" || d.scope === "within_b")) {
@@ -2453,6 +2622,7 @@ class RunView {
     const scope = d.scope === "within_a" ? `within ${labelA}` : d.scope === "within_b" ? `within ${labelB}` : "";
     return `<article class="finding sev-${esc(sev)} st-${esc(status)} ${open ? "open" : ""} ${this.focusId === d.id ? "focus" : ""}" data-fid="${esc(d.id)}">
       <div class="f-head" data-toggle="${esc(d.id)}">
+        ${this.readOnly() ? "" : `<input type="checkbox" class="f-sel" data-sel="${esc(d.id)}" ${this.selected.has(d.id) ? "checked" : ""} aria-label="Select ${esc(d.id)}">`}
         <span class="chev">&#9654;</span><span class="f-id">${esc(d.id)}</span><span class="f-topic">${esc(d.topic)}</span>
         <span class="f-tags">
           ${d.issue_class ? `<span class="badge class">${esc(classes[d.issue_class] || d.issue_class.replace(/_/g, " "))}</span>` : ""}
@@ -2465,6 +2635,8 @@ class RunView {
             : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent model (${esc(d.verification.model || "")})">&#10003; double-checked</span>` : ""}
           ${status !== "open" ? `<span class="badge ${status === "accepted" ? "ok" : "outline"}">${esc(status)}</span>` : ""}
           ${rv.note ? `<span class="badge outline" title="${esc(rv.note)}">note</span>` : ""}
+          ${this.commentCounts[`finding:${d.id}`] ? `<span class="badge outline" title="Comments">&#128172; ${this.commentCounts[`finding:${d.id}`]}</span>` : ""}
+          ${rv.assignee ? `<span class="badge outline" title="Assigned">&#128100; ${esc(this.userName(rv.assignee))}</span>` : ""}
           ${rfis.map((no) => `<button class="badge outline" data-goto-rfi="${esc(no)}" title="Open ${esc(no)}">${esc(no)}</button>`).join("")}
           <span class="badge sev-${esc(sev)}" ${rv.severity ? `title="Changed from ${esc(d.severity)}"` : ""}>${esc(sev)}${rv.severity ? "*" : ""}</span>
         </span>
@@ -2488,9 +2660,12 @@ class RunView {
           </select>
           ${rfis.length ? `<button class="btn sm" data-goto-rfi="${esc(rfis[0])}">Open ${esc(rfis[0])} &rarr;</button>`
             : `<button class="btn sm" data-new-rfi="${esc(d.id)}">Draft an RFI for this</button>`}
+          <select data-assign="${esc(d.id)}" aria-label="Assign to" ${this.readOnly() ? "disabled" : ""}><option value="">Assign to&hellip;</option>
+            ${(this.users || []).map((u) => `<option value="${esc(u.id)}" ${rv.assignee === u.id ? "selected" : ""}>${esc(u.display_name)}</option>`).join("")}</select>
           <textarea data-note="${esc(d.id)}" rows="1" placeholder="Reviewer note (saved automatically)">${esc(rv.note)}</textarea>
           ${rv.by ? `<div class="f-review-meta">Last reviewed by ${esc(rv.by)} ${timeEl(rv.at)}</div>` : ""}
         </div>
+        ${open ? `<div class="f-comments" data-comments-for="${esc(d.id)}"></div>` : ""}
       </div>
     </article>`;
   }
@@ -2663,7 +2838,9 @@ class RunView {
         ${["subject", "discrepancy_summary", "question", "proposed_solution"].filter((k) => rfi.previous_text[k]).map((k) =>
           `<div class="field-label">${esc(k.replace(/_/g, " "))}</div><div class="prev-val">${esc(Array.isArray(rfi.previous_text[k]) ? rfi.previous_text[k].join("\n") : rfi.previous_text[k])}</div>`).join("")}</details>` : ""}
       <div data-rfi-actions></div>
+      <div class="rfi-comments"><div class="field-label">Comments</div><div data-rfi-comments></div></div>
     </section>`;
+    if (window.CS.mountComments) window.CS.mountComments($("[data-rfi-comments]", wrap), { run_id: this.id, target_type: "rfi", target_id: rfi.rfi_no });
     wrap.addEventListener("input", (e) => this.onRfiField(e));
     wrap.addEventListener("change", (e) => { if (e.target.tagName === "SELECT") this.onRfiField(e); });
     this.renderRfiActions();
@@ -2697,6 +2874,7 @@ class RunView {
         ${rfi.docx_file ? dl(rfi.docx_file, "Download .docx") : ""}
         ${rfi.original_docx_file ? dl(rfi.original_docx_file, "AI draft .docx") : ""}
         <a class="btn" href="/api/runs/${esc(this.id)}/rfis/${encodeURIComponent(rfi.rfi_no)}/pdf">PDF</a>
+        <button class="btn ghost" data-print-rfi title="Print this RFI">Print</button>
         ${rfi.log_id ? `<button class="btn" data-act="open-log" title="Open this RFI in the project's RFI log">&#128203; ${esc(rfi.log_no || "In the RFI log")}</button>`
           : this.readOnly() ? "" : `<button class="btn" data-act="register-rfi" title="Give it the project's next RFI number and track it to closure">Add to RFI log</button>`}
         <span class="grow"></span>
@@ -2809,6 +2987,21 @@ class RunView {
       const set = this.filters.sev;
       if (e.altKey || e.shiftKey) { set.clear(); set.add(s); } else if (set.has(s)) set.delete(s); else set.add(s);
       this.renderFindingList();
+      return;
+    }
+    const sel = t.closest("[data-sel]");
+    if (sel) { e.stopPropagation(); if (sel.checked) this.selected.add(sel.dataset.sel); else this.selected.delete(sel.dataset.sel); this.renderFindingList(); return; }
+    const bulk = t.closest("[data-bulk]");
+    if (bulk) { this.bulk({ status: bulk.dataset.bulk }); return; }
+    if (t.closest("[data-bulk-clear]")) { this.selected.clear(); this.renderFindingList(); return; }
+    if (t.closest("[data-bulk-all]")) { this.filteredFindings().list.forEach((d) => this.selected.add(d.id)); this.renderFindingList(); return; }
+    const ev = t.closest("[data-ev]");
+    if (ev) { e.stopPropagation(); window.CS.showEvidence(this.id, ev.dataset.ev, ev.dataset.evq, ev.dataset.evr); return; }
+    if (t.closest("[data-print]")) { this.el.classList.add("printing"); this.filteredFindings().list.forEach((d) => this.expanded.add(d.id)); this.renderFindingList(); setTimeout(() => { window.print(); this.el.classList.remove("printing"); }, 200); return; }
+    if (t.closest("[data-print-rfi]")) { document.body.classList.add("print-rfi"); setTimeout(() => { window.print(); document.body.classList.remove("print-rfi"); }, 100); return; }
+    if (t.closest("[data-save-view]")) {
+      const name = await promptDialog("Save this view", { label: "Name", placeholder: "e.g. My open critical findings" });
+      if (name) { window.CS.Views.save(name, this.filters); toast(`View "${name}" saved`, { type: "success", timeout: 1800 }); this.renderStep(); }
       return;
     }
     if (this.readOnly() && t.closest("[data-triage] button, [data-new-rfi], [data-move], [data-remove], [data-act=start], [data-act=clone], [data-act=register], [data-act=add-rfi], [data-act=docx-all], [data-act=docx], [data-act=revert-rfi], [data-act=delete-rfi], [data-act=clear-meta]")) {
@@ -2977,6 +3170,8 @@ function initShell() {
       { label: `Theme: dark${cur === "dark" ? "  ✓" : ""}`, onClick: () => Theme.set("dark") },
       { label: `Theme: match system${cur === "system" ? "  ✓" : ""}`, onClick: () => Theme.set("system") },
       { label: "Keyboard shortcuts", onClick: () => showShortcuts() },
+      window.CS.setLanguage && { label: window.CS.language() === "ar" ? "Language: English" : "اللغة: العربية (Arabic)",
+        onClick: () => window.CS.setLanguage(window.CS.language() === "ar" ? "en" : "ar") },
       "-",
       { label: "Sign out", onClick: () => signOut() },
     ]);

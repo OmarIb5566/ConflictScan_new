@@ -384,8 +384,55 @@ rfi_log_files = Table(
     Index("ix_rfi_log_files_log", "log_id"),
 )
 
+# --- Collaboration (migration 0006) ---------------------------------------------
+
+comments = Table(
+    "comments", metadata,
+    ID(name="id", primary_key=True),
+    Column("project_id", String(32), nullable=False),
+    Column("run_id", String(32)),
+    Column("target_type", String(20), nullable=False),      # finding | rfi | rfi_log | run
+    Column("target_id", Unicode(64), nullable=False),
+    Column("user_id", String(32), nullable=False),
+    Column("body", UnicodeText, nullable=False),
+    Column("mentions", JSONText),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("edited_at", UTCDateTime),
+    Column("deleted_at", UTCDateTime),
+    Index("ix_comments_target", "project_id", "target_type", "target_id"),
+)
+
+notifications = Table(
+    "notifications", metadata,
+    ID(name="id", primary_key=True),
+    Column("user_id", String(32), nullable=False),
+    Column("kind", String(30), nullable=False),             # scan_done | scan_failed | assigned | mention | rfi_review | rfi_overdue | rfi_status
+    Column("title", Unicode(300), nullable=False),
+    Column("body", Unicode(1000)),
+    Column("link", Unicode(300)),
+    Column("project_id", String(32)),
+    Column("dedupe", Unicode(120)),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("read_at", UTCDateTime),
+    Index("ix_notifications_user", "user_id", "read_at", "created_at"),
+)
+
+upload_sessions = Table(
+    "upload_sessions", metadata,
+    ID(name="id", primary_key=True),
+    Column("run_id", String(32), nullable=False),
+    Column("slot", String(4), nullable=False),
+    Column("name", Unicode(300), nullable=False),
+    Column("size", BigInteger, nullable=False),
+    Column("received", BigInteger, nullable=False, default=0),
+    Column("key", Unicode(500), nullable=False),
+    Column("created_by", String(32), nullable=False),
+    Column("created_at", UTCDateTime, nullable=False),
+)
+
 ALL_TABLES = [users, user_prefs, projects, project_members, runs, run_files, jobs, audit_log,
-              login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings, rfi_log, rfi_log_files]
+              login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings, rfi_log, rfi_log_files,
+              comments, notifications, upload_sessions]
 
 
 # ---------------------------------------------------------------------------
