@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Union
 
-from nodes.llm_client import OllamaLLM, OLLAMA_URL, ollama_options
+from nodes.llm_client import OllamaLLM, OLLAMA_URL, ollama_options, http
 
 VISION_MODEL_NAME = os.environ.get("CONFLICTSCAN_VISION_MODEL", "gemma4:e4b")
 
@@ -103,7 +103,7 @@ class OllamaVisionLLM(OllamaLLM):
                 print(f"[vision] Calling vision LLM ({len(images_b64)} image(s))...")
                 import requests
 
-                response = requests.post(
+                response = http.post(
                     self.url,
                     headers={"Content-Type": "application/json"},
                     data=json.dumps(payload),
@@ -145,7 +145,7 @@ class OllamaVisionLLM(OllamaLLM):
         try:
             import requests
             tags_url = self.url.replace("/api/chat", "/api/tags")
-            installed = [m.get("name", "") for m in requests.get(tags_url, timeout=5).json().get("models", [])]
+            installed = [m.get("name", "") for m in http.get(tags_url, timeout=5).json().get("models", [])]
         except Exception:
             pass
         for preferred in OCR_MODEL_PREFERENCE:
@@ -191,7 +191,7 @@ class OllamaVisionLLM(OllamaLLM):
 
         for attempt in range(max_retries + 1):
             try:
-                response = requests.post(self.url, json=payload, timeout=600)
+                response = http.post(self.url, json=payload, timeout=600)
                 response.raise_for_status()
                 content = response.json().get("message", {}).get("content", "") or ""
                 if payload.get("format") == "json":

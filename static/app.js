@@ -120,6 +120,7 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   if (!res.ok || (data && data.error)) {
     const err = new Error((data && data.error) || `Request failed (${res.status})`);
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -193,8 +194,9 @@ function modal({ title, body, actions = [], wide = false, cls = "", onOpen, onCl
       showFormError(bodyEl, err.message);
     } finally { if (btn) btn.disabled = false; }
   };
+  const sticky = /\bno-dismiss\b/.test(cls);
   const onKey = (e) => {
-    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); }
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); if (!sticky) close(); }
     else if (e.key === "Enter" && !e.shiftKey && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "BUTTON") {
       const i = actions.findIndex((a) => a.primary);
       if (i >= 0) { e.preventDefault(); e.stopPropagation(); run(actions[i], foot.children[i]); }
@@ -206,8 +208,8 @@ function modal({ title, body, actions = [], wide = false, cls = "", onOpen, onCl
     foot.appendChild(b);
   });
   if (!actions.length) foot.remove();
-  ov.addEventListener("mousedown", (e) => { if (e.target === ov) close(); });
-  ov.querySelector("[data-x]").onclick = close;
+  ov.addEventListener("mousedown", (e) => { if (e.target === ov && !sticky) close(); });
+  if (sticky) ov.querySelector("[data-x]").remove(); else ov.querySelector("[data-x]").onclick = close;
   document.addEventListener("keydown", onKey, true);
   document.body.appendChild(ov);
   const focusable = bodyEl.querySelector("[autofocus]") || bodyEl.querySelector("input:not([type=radio]):not([type=checkbox]), textarea, select");
@@ -338,6 +340,11 @@ window.addEventListener("beforeunload", (e) => {
 // App state
 // =====================================================================
 
+const RANK = { viewer: 1, engineer: 2, manager: 3 };
+const canRole = (role, need) => (RANK[role] || 0) >= RANK[need];
+const ROLE_LABEL = { admin: "Admin", manager: "Project manager", engineer: "Engineer", viewer: "Viewer" };
+const isAdmin = () => App.me && App.me.role === "admin";
+
 const App = {
   me: null,
   prefs: {},
@@ -407,6 +414,9 @@ const Auth = {
     pw.minLength = mode === "register" ? ((this.status && this.status.min_password) || 8) : 0;
     pw.placeholder = mode === "register" ? `At least ${pw.minLength} characters` : "";
     $("#auth-error").hidden = true;
+    $("#auth-error").classList.remove("ok");
+    const hint = $("#auth-dir-hint");
+    if (hint) hint.hidden = !(this.status && /ldap/.test(this.status.auth_mode || "")) || mode !== "login";
   },
   init() {
     $$("#auth-mode button").forEach((b) => { b.onclick = () => this.setMode(b.dataset.mode); });
@@ -420,7 +430,15 @@ const Auth = {
       const btn = $("#auth-submit");
       btn.disabled = true;
       try {
-        await api(this.mode === "login" ? "/api/auth/login" : "/api/auth/register", { method: "POST", body });
+        const res = await api(this.mode === "login" ? "/api/auth/login" : "/api/auth/register", { method: "POST", body });
+        if (res && res.pending) {
+          $("#auth-error").textContent = res.message;
+          $("#auth-error").hidden = false;
+          $("#auth-error").classList.add("ok");
+          this.setMode("login");
+          btn.disabled = false;
+          return;
+        }
         location.reload();
       } catch (err) {
         $("#auth-error").textContent = err.message;
@@ -438,21 +456,45 @@ async function signOut() {
   location.reload();
 }
 
+function forcePasswordChange() {
+  modal({
+    title: "Choose a new password",
+    cls: "no-dismiss",
+    body: `<p class="hint">Your account was set up with a temporary password. Choose your own to continue.</p>
+      <label class="field"><span>Temporary password</span><input name="current_password" type="password" autocomplete="current-password"></label>
+      <label class="field"><span>New password</span><input name="new_password" type="password" autocomplete="new-password" placeholder="At least 8 characters"></label>`,
+    actions: [{ label: "Sign out", onClick: () => signOut() }, {
+      label: "Save password", primary: true,
+      onClick: async (b) => {
+        const r = await api("/api/me", { method: "PATCH", body: {
+          current_password: b.querySelector("[name=current_password]").value,
+          new_password: b.querySelector("[name=new_password]").value } });
+        App.me = r.user;
+        toast("Password changed", { type: "success" });
+      },
+    }],
+  });
+}
+
 function accountDialog() {
+  const directory = App.me.auth_source && App.me.auth_source !== "local";
   modal({
     title: "Account",
     body: `
       <label class="field"><span>Display name</span><input name="display_name" value="${esc(App.me.display_name)}"></label>
-      <div class="hint">Signed in as <strong>${esc(App.me.username)}</strong>. Your display name appears on scans and edits you make.</div>
+      <div class="hint">Signed in as <strong>${esc(App.me.username)}</strong> &middot; ${esc(ROLE_LABEL[App.me.role] || App.me.role)}${directory ? " &middot; company directory account" : ""}.
+        Your display name appears on scans and edits you make.</div>
       <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+      ${directory ? `<p class="hint">Your password is managed by the company directory.</p>` : `
       <div class="field-label">Change password</div>
       <label class="field"><span>Current password</span><input name="current_password" type="password" autocomplete="current-password"></label>
-      <label class="field"><span>New password</span><input name="new_password" type="password" autocomplete="new-password"></label>`,
+      <label class="field"><span>New password</span><input name="new_password" type="password" autocomplete="new-password"></label>`}`,
     actions: [{ label: "Cancel" }, {
       label: "Save", primary: true,
       onClick: async (b) => {
         const body = { display_name: b.querySelector("[name=display_name]").value.trim() };
-        const np = b.querySelector("[name=new_password]").value;
+        const npEl = b.querySelector("[name=new_password]");
+        const np = npEl ? npEl.value : "";
         if (np) { body.new_password = np; body.current_password = b.querySelector("[name=current_password]").value; }
         const r = await api("/api/me", { method: "PATCH", body });
         App.me = r.user;
@@ -502,7 +544,8 @@ const WS = {
 
   create(key) {
     const { type, id } = this.parse(key);
-    const view = type === "home" ? new HomeView() : type === "project" ? new ProjectView(id) : type === "run" ? new RunView(id) : null;
+    const Ctor = VIEW_TYPES[type];
+    const view = Ctor ? new Ctor(id) : null;
     if (!view) return null;
     view.el.hidden = true;
     $("#views").appendChild(view.el);
@@ -661,7 +704,8 @@ const WS = {
   },
 
   openFromHash() {
-    const m = location.hash.match(/^#\/(run|project)\/([\w-]+)(?:\/(\w+))?/);
+    const m = location.hash.match(/^#\/(\w+)\/([\w-]+)(?:\/([\w-]+))?/);
+    if (m && !VIEW_TYPES[m[1]]) return false;
     if (!m) return false;
     this.open(m[1], m[2], { step: m[3] });
     return true;
@@ -673,7 +717,9 @@ const WS = {
     for (const key of ws.tabs || []) {
       if (key === "home" || this.tabs.includes(key)) continue;
       const { type, id } = this.parse(key);
-      const exists = type === "project" ? App.projectIndex.has(id) : type === "run" ? App.runIndex.has(id) : false;
+      const Ctor = VIEW_TYPES[type];
+      const exists = type === "project" ? App.projectIndex.has(id) : type === "run" ? App.runIndex.has(id)
+        : !!(Ctor && Ctor.canRestore && Ctor.canRestore(id));
       if (exists) this.open(type, id, { activate: false });
     }
     if (!this.openFromHash()) this.activate(this.tabs.includes(ws.active) ? ws.active : "home");
@@ -719,6 +765,17 @@ const Sidebar = {
     const pid = v ? (v.projectId ? v.projectId() : null) : null;
     $$("#sidebar [data-project]").forEach((a) => a.classList.toggle("on", a.dataset.project === pid));
     $("#nav-home").classList.toggle("on", WS.active === "home");
+    $$("#sidebar [data-nav-key]").forEach((a) => a.classList.toggle("on", a.dataset.navKey === WS.active));
+  },
+  renderNav() {
+    const nav = $(".side-nav");
+    $$("[data-nav-key]", nav).forEach((n) => n.remove());
+    for (const item of NAV_ITEMS) {
+      if (item.show && !item.show()) continue;
+      const a = el(`<a data-nav-key="${esc(item.key)}">${item.icon || ""}&nbsp; ${esc(item.label)}${item.badge ? `<span class="nav-badge" data-nav-badge="${esc(item.key)}"></span>` : ""}</a>`);
+      a.onclick = () => item.open();
+      nav.appendChild(a);
+    }
   },
   renderJobs(list) {
     const active = list.filter((r) => ACTIVE.has(r.status));
@@ -833,6 +890,7 @@ const Palette = {
       { k: "Action", t: "Account settings", run: () => accountDialog() },
       { k: "Action", t: "Sign out", run: () => signOut() },
     ];
+    for (const f of PALETTE_ITEMS) for (const it of f() || []) actions.push({ k: "Action", t: it.label, sub: it.sub, run: it.run });
     const projects = App.projects.map((p) => ({
       k: p.archived ? "Archived" : "Project", t: p.name, sub: p.owner_name, hay: `${p.name} ${p.description} ${p.owner_name}`,
       run: () => WS.open("project", p.id),
@@ -939,7 +997,8 @@ function newScanDialog(projectId) {
         <input type="radio" name="c" value="new" ${choice === "new" ? "checked" : ""}>
         <div class="grow stack">
           <div><div class="t">New project</div><div class="hint">Start a fresh piece of work.</div></div>
-          <input name="name" placeholder="Project name, e.g. ALSTOM Borg El Arab">
+          <input name="name" placeholder="Project name - type to search the company register" list="ref-projects" autocomplete="off">
+          <datalist id="ref-projects"></datalist>
           <select name="visibility"><option value="team">Visible to the whole team</option><option value="private">Private to me</option></select>
         </div>
       </div>
@@ -960,7 +1019,7 @@ function newScanDialog(projectId) {
         if (choice === "new") {
           const name = b.querySelector("[name=name]").value.trim();
           if (!name) throw new Error("Give the project a name.");
-          const r = await api("/api/projects", { method: "POST", body: { name, visibility: b.querySelector("[name=visibility]").value } });
+          const r = await api("/api/projects", { method: "POST", body: { name, visibility: b.querySelector("[name=visibility]").value, reference: refPick(b, name) } });
           run = r.run;
         } else {
           const pid = b.querySelector("[name=project]").value;
@@ -980,6 +1039,7 @@ function newScanDialog(projectId) {
       };
       $$(".choice", b).forEach((c) => c.addEventListener("click", () => { choice = c.dataset.c; sync(); }));
       (choice === "new" ? b.querySelector("[name=name]") : b.querySelector("[name=project]")).focus();
+      bindReferenceLookup(b);
     },
   });
 }
@@ -988,9 +1048,12 @@ function newProjectDialog() {
   modal({
     title: "New project",
     body: `
-      <label class="field"><span>Name</span><input name="name" placeholder="e.g. Terrace Zayed - Package 2" autofocus></label>
+      <label class="field"><span>Name</span><input name="name" placeholder="Type to search the company project register" list="ref-projects" autocomplete="off" autofocus>
+        <datalist id="ref-projects"></datalist></label>
+      <div class="hint" data-ref-hint></div>
       <label class="field"><span>Description (optional)</span><textarea name="description" rows="2" placeholder="Scope, client, anything the team should know"></textarea></label>
-      <label class="field"><span>Who can see it</span><select name="visibility"><option value="team">The whole team</option><option value="private">Only me</option></select></label>`,
+      <label class="field"><span>Who can see it</span><select name="visibility"><option value="team">The whole team</option><option value="private">Only me and the members I add</option></select></label>`,
+    onOpen: (b) => bindReferenceLookup(b),
     actions: [{ label: "Cancel" }, {
       label: "Create project", primary: true,
       onClick: async (b) => {
@@ -998,6 +1061,7 @@ function newProjectDialog() {
         if (!name) throw new Error("Give the project a name.");
         const r = await api("/api/projects", { method: "POST", body: {
           name, description: b.querySelector("[name=description]").value, visibility: b.querySelector("[name=visibility]").value, create_run: false,
+          reference: refPick(b, name),
         } });
         await refreshProjects();
         WS.open("project", r.project.id);
@@ -1005,6 +1069,30 @@ function newProjectDialog() {
     }],
   });
 }
+
+// Company project register (read-only): typing a name offers matching projects;
+// picking one carries its code, client and consultant into the RFI form header.
+function bindReferenceLookup(b) {
+  const input = b.querySelector("[name=name]");
+  const list = b.querySelector("#ref-projects");
+  if (!input || !list) return;
+  b._refs = [];
+  const search = debounce(async () => {
+    const q = input.value.trim();
+    if (q.length < 2) return;
+    try {
+      b._refs = await api(`/api/reference/projects?q=${encodeURIComponent(q)}`);
+      list.innerHTML = b._refs.map((p) => `<option value="${esc(p.name)}">${esc(p.code)} &middot; ${esc(p.client || "")}</option>`).join("");
+    } catch { /* register unavailable: plain typing still works */ }
+  }, 250);
+  input.addEventListener("input", () => {
+    search();
+    const hit = refPick(b, input.value.trim());
+    const hint = b.querySelector("[data-ref-hint]");
+    if (hint) hint.innerHTML = hit ? `From the project register: <strong>${esc(hit.code)}</strong>${hit.client ? ` &middot; ${esc(hit.client)}` : ""}${hit.consultant ? ` &middot; ${esc(hit.consultant)}` : ""} &mdash; filled into the RFI form header.` : "";
+  });
+}
+function refPick(b, name) { return (b._refs || []).find((p) => p.name === name) || null; }
 
 async function patchProject(p, body, msg) {
   try {
@@ -1057,8 +1145,59 @@ function projectMenu(p, anchor) {
     { label: "Rename", onClick: () => renameProject(p) },
     { label: p.archived ? "Restore from archive" : "Archive", onClick: () => setArchived(p, !p.archived) },
     "-",
-    { label: "Delete project", danger: true, disabled: !p.is_owner, title: p.is_owner ? "" : "Only the owner can delete", onClick: () => deleteProject(p) },
+    { label: "Members & access", onClick: () => membersDialog(p) },
+    ...PROJECT_MENU_ITEMS.map((f) => f(p)).filter(Boolean),
+    "-",
+    { label: "Delete project", danger: true, disabled: !canRole(p.my_role, "manager"), title: canRole(p.my_role, "manager") ? "" : "Only project managers can delete", onClick: () => deleteProject(p) },
   ]);
+}
+
+async function membersDialog(p) {
+  let data;
+  try { data = await api(`/api/projects/${p.id}/members`); } catch (err) { toastError(err); return; }
+  const manage = canRole(p.my_role, "manager");
+  const users = manage ? await api("/api/users").catch(() => []) : [];
+  const roleSel = (uid, role) => `<select data-member-role="${esc(uid)}" ${manage ? "" : "disabled"}>
+    ${["manager", "engineer", "viewer"].map((r) => `<option value="${r}" ${r === role ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select>`;
+  const render = (b) => {
+    const inList = new Set([data.owner && data.owner.id, ...data.members.map((m) => m.user_id)]);
+    b.querySelector("[data-members]").innerHTML = `
+      ${data.owner ? `<li>${avatar(data.owner.display_name, "sm")}<span class="grow">${esc(data.owner.display_name)} <span class="muted">@${esc(data.owner.username)}</span></span><span class="badge outline">Owner</span></li>` : ""}
+      ${data.members.map((m) => `<li>${avatar(m.display_name, "sm")}<span class="grow">${esc(m.display_name)} <span class="muted">@${esc(m.username)}</span></span>
+        ${roleSel(m.user_id, m.role)}${manage ? `<button class="icon-btn sm" data-member-remove="${esc(m.user_id)}" title="Remove">&times;</button>` : ""}</li>`).join("")}`;
+    const add = b.querySelector("[data-member-add]");
+    if (add) add.innerHTML = `<option value="">Add a person&hellip;</option>` + users.filter((u) => !inList.has(u.id))
+      .map((u) => `<option value="${esc(u.id)}">${esc(u.display_name)} (@${esc(u.username)})</option>`).join("");
+  };
+  modal({
+    title: `Members of ${p.name}`,
+    body: `<p class="hint">${p.visibility === "private" ? "This project is <strong>private</strong>: only these people (and administrators) can see it."
+      : "This project is visible to the <strong>whole team</strong> with their usual role. Members listed here get the role you choose instead."}</p>
+      <ul class="member-list" data-members></ul>
+      ${manage ? `<div class="member-add"><select data-member-add></select>
+        <select data-member-new-role>${["engineer", "viewer", "manager"].map((r) => `<option value="${r}">${ROLE_LABEL[r]}</option>`).join("")}</select>
+        <button class="btn" data-member-add-btn>Add</button></div>` : `<p class="hint">Only project managers can change members.</p>`}`,
+    actions: [{ label: "Done", primary: true }],
+    onOpen: (b) => {
+      render(b);
+      const set = async (uid, role) => {
+        try { data.members = (await api(`/api/projects/${p.id}/members/${uid}`, { method: "PUT", body: { role } })).members; render(b); }
+        catch (err) { toastError(err); }
+      };
+      b.addEventListener("change", (e) => { const s = e.target.closest("[data-member-role]"); if (s) set(s.dataset.memberRole, s.value); });
+      b.addEventListener("click", async (e) => {
+        const rm = e.target.closest("[data-member-remove]");
+        if (rm) {
+          try { data.members = (await api(`/api/projects/${p.id}/members/${rm.dataset.memberRemove}`, { method: "DELETE" })).members; render(b); }
+          catch (err) { toastError(err); }
+        }
+        if (e.target.closest("[data-member-add-btn]")) {
+          const uid = b.querySelector("[data-member-add]").value;
+          if (uid) set(uid, b.querySelector("[data-member-new-role]").value);
+        }
+      });
+    },
+  });
 }
 
 async function cloneRun(runId, { seq } = {}) {
@@ -1296,20 +1435,26 @@ class ProjectView {
         </div>
         <div class="head-actions">
           <button class="btn" data-act="menu" aria-label="More">&#8943;</button>
+          <button class="btn" data-act="members" title="Who can see and edit this project">&#128101; Members</button>
+          ${PROJECT_ACTIONS.map((a) => a.show && !a.show(p) ? "" : `<button class="btn" data-project-action="${esc(a.key)}">${a.label}</button>`).join("")}
           ${p.latest_complete ? `<button class="btn" data-act="open-latest">Open latest results</button>` : ""}
-          ${p.latest_complete ? `<button class="btn" data-act="rerun">Edit &amp; re-run Rev ${p.latest_complete.seq}</button>` : ""}
-          <button class="btn primary" data-act="new-scan">+ New scan</button>
+          ${p.latest_complete && canRole(p.my_role, "engineer") ? `<button class="btn" data-act="rerun">Edit &amp; re-run Rev ${p.latest_complete.seq}</button>` : ""}
+          ${canRole(p.my_role, "engineer") ? `<button class="btn primary" data-act="new-scan">+ New scan</button>` : ""}
         </div>
       </div>
+      ${p.my_role === "viewer" ? `<div class="banner info"><span class="grow"><strong>View only.</strong> You can open every revision and download its outputs; ask a project manager for edit access.</span></div>` : ""}
       <div class="card">
         <label class="field"><span>Description</span>
-          <textarea data-desc rows="2" placeholder="Scope, client, package, anything the team should know">${esc(p.description)}</textarea></label>
+          <textarea data-desc rows="2" ${canRole(p.my_role, "engineer") ? "" : "readonly"} placeholder="Scope, client, package, anything the team should know">${esc(p.description)}</textarea></label>
       </div>
+      <div data-project-extras></div>
       <div class="section-title"><h3>Scans</h3><span class="hint">Every revision is kept. Open any one to review or edit its results, or make a new revision from it.</span></div>
       <div data-runs></div>`;
     this.renderHeadMeta();
     this.renderRuns();
+    for (const hook of PROJECT_SECTIONS) hook(this, $("[data-project-extras]", this.el));
     const name = $("[data-name]", this.el);
+    if (!canRole(p.my_role, "engineer")) name.readOnly = true;
     const saveName = () => {
       const v = name.value.trim();
       if (!v) { name.value = this.data.name; return; }
@@ -1329,10 +1474,12 @@ class ProjectView {
     if (!meta) return;
     meta.innerHTML = `
       <span class="row">${avatar(p.owner_name, "sm")} Owner: ${esc(p.is_owner ? "you" : p.owner_name)}</span>
+      ${p.code ? `<span class="badge outline mono" title="Project code">${esc(p.code)}</span>` : ""}
+      <span class="badge role-${esc(p.my_role)}" title="Your role in this project">${esc(ROLE_LABEL[p.my_role] || p.my_role)}</span>
       <span>Created ${timeEl(p.created_at)}</span>
-      ${p.is_owner ? `<select data-vis style="width:auto;padding:2px 8px;font-size:12px;border-radius:999px">
+      ${canRole(p.my_role, "manager") ? `<select data-vis style="width:auto;padding:2px 8px;font-size:12px;border-radius:999px">
           <option value="team" ${p.visibility === "team" ? "selected" : ""}>Visible to the team</option>
-          <option value="private" ${p.visibility === "private" ? "selected" : ""}>Private to me</option></select>`
+          <option value="private" ${p.visibility === "private" ? "selected" : ""}>Private (members only)</option></select>`
         : `<span class="badge outline">${p.visibility === "private" ? "Private" : "Team"}</span>`}
       ${p.archived ? `<span class="badge outline">Archived</span> <button class="link-btn" data-act="unarchive">Restore</button>` : ""}
       <span data-save></span>`;
@@ -1386,8 +1533,11 @@ class ProjectView {
       if (a === "open-latest" && this.data.latest_complete) WS.open("run", this.data.latest_complete.id, { step: "findings" });
       if (a === "menu" && p) projectMenu(p, act);
       if (a === "unarchive" && p) setArchived(p, false);
+      if (a === "members") membersDialog(this.data);
       return;
     }
+    const pa = e.target.closest("[data-project-action]");
+    if (pa) { const def = PROJECT_ACTIONS.find((x) => x.key === pa.dataset.projectAction); if (def) def.run(this.data, this); return; }
     const menuBtn = e.target.closest("[data-run-menu]");
     if (menuBtn) {
       e.stopPropagation();
@@ -1449,8 +1599,11 @@ class RunView {
     this.el = el(`<div class="view"><div class="view-inner">
       <div data-head></div><nav class="stepper" data-stepper aria-label="Scan stages"></nav><div data-body></div></div></div>`);
     const onState = (s, err) => { const n = $("[data-save]", this.el); if (n) n.innerHTML = saveStateHtml(s, err); };
-    this.inputSaver = new Saver((patch) => api(`/api/runs/${id}`, { method: "PATCH", body: { inputs: patch } })
-      .then((r) => { this.run.status = r.status; this.run.inputs_editable = r.inputs_editable; return r; }), { onState });
+    this.inputSaver = new Saver((patch) => api(`/api/runs/${id}`, { method: "PATCH", body: { inputs: patch, base_inputs_rev: (this.run.inputs || {})._rev || 0 } })
+      .then((r) => { this.run.status = r.status; this.run.inputs_editable = r.inputs_editable; this.run.inputs._rev = r.inputs._rev; return r; })
+      .catch((err) => this.onInputsConflict(err, patch)), { onState });
+    this.presenceTimer = null;
+    this.others = [];
     this.titleSaver = new Saver((patch) => api(`/api/runs/${id}`, { method: "PATCH", body: patch }).then((r) => { refreshSoon(); return r; }), { onState });
     this.el.addEventListener("click", (e) => this.onClick(e));
   }
@@ -1469,14 +1622,72 @@ class RunView {
   projectId() { return this.run ? this.run.project_id : ((this.info() || {}).run || {}).project_id; }
   copyLink() { navigator.clipboard.writeText(location.origin + "/" + this.hash()).then(() => toast("Link copied - anyone on the team with access can open it", { timeout: 2500 })); }
   setInitialStep(step) { if (STEPS.some(([k]) => k === step)) { if (this.loaded) this.goto(step); else this.step = step; } }
-  onShow() { this.syncTimers(); }
-  onHide() { this.syncTimers(true); }
+  onShow() { this.syncTimers(); this.startPresence(); }
+  onHide() { this.syncTimers(true); this.stopPresence(); }
+  readOnly() { return this.run && this.run.my_role === "viewer"; }
+
+  // ---- presence: "Sara is viewing this" ---------------------------------------
+  startPresence() {
+    this.stopPresence(false);
+    const ping = async () => {
+      try {
+        const others = await api("/api/presence", { method: "POST", body: { target: `run:${this.id}`, detail: this.step || "" } });
+        const changed = JSON.stringify(others) !== JSON.stringify(this.others);
+        this.others = others;
+        if (changed) this.renderPresence();
+      } catch { /* presence is best-effort */ }
+    };
+    ping();
+    this.presenceTimer = setInterval(ping, 20000);
+  }
+  stopPresence(leave = true) {
+    clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
+    if (leave) api("/api/presence", { method: "POST", body: { target: `run:${this.id}`, leave: true } }).catch(() => {});
+  }
+  renderPresence() {
+    const n = $("[data-presence]", this.el);
+    if (!n) return;
+    const STEP_NAME = Object.fromEntries(STEPS);
+    n.innerHTML = this.others.length ? `<span class="presence" title="${esc(this.others.map((o) => `${o.display_name}${o.detail ? " - " + (STEP_NAME[o.detail] || o.detail) : ""}`).join("\n"))}">
+      ${this.others.slice(0, 4).map((o) => avatar(o.display_name, "sm")).join("")}
+      <span>${esc(this.others.length === 1 ? `${this.others[0].display_name} is viewing this` : `${this.others.length} others are viewing this`)}</span></span>` : "";
+  }
+
+  // ---- edit conflicts ----------------------------------------------------------
+  async onInputsConflict(err, patch) {
+    if (!(err.status === 409 && err.data && err.data.conflict)) throw err;
+    this.run.inputs = { ...err.data.inputs };
+    toast(`${err.data.updated_by_name || "Someone"} changed these settings while you were typing. Their version is shown; re-enter your change if it's still needed.`,
+      { type: "error", timeout: 9000 });
+    this.renderStep();
+    return { inputs: this.run.inputs, status: this.run.status, inputs_editable: this.run.inputs_editable };
+  }
+
+  async onRfiConflict(no, err, patch) {
+    if (!(err.status === 409 && err.data && err.data.conflict)) throw err;
+    const theirs = err.data.rfi;
+    const keepMine = await confirmDialog(`${theirs.edited_by || "Someone"} saved ${no} while you were editing it.
+      Keep your changes (overwriting theirs), or load their version?`, { title: "Edited by someone else", confirmLabel: "Keep my changes" });
+    const items = this.results().rfi_items || [];
+    const i = items.findIndex((x) => x.rfi_no === no);
+    if (keepMine) {
+      const server = await api(`/api/runs/${this.id}/rfis/${encodeURIComponent(no)}`, { method: "PUT", body: patch });
+      if (i >= 0) items[i].rev = server.rev;
+      return server;
+    }
+    if (i >= 0) items[i] = theirs;
+    if (this.selectedRfi === no) this.renderRfiEditor();
+    this.renderRfiList();
+    return theirs;
+  }
   onProjectsChanged() { if (this.loaded) this.renderHead(); }
   async flushAll() {
     await Promise.allSettled([this.inputSaver, this.titleSaver, ...this.rfiSavers.values(), ...this.noteSavers.values()].map((s) => s.flush()));
   }
   destroy() {
     this.syncTimers(true);
+    this.stopPresence();
     [this.inputSaver, this.titleSaver, ...this.rfiSavers.values(), ...this.noteSavers.values()].forEach((s) => s.dispose());
   }
 
@@ -1486,6 +1697,7 @@ class RunView {
     if (!this.step || !this.available(this.step)) this.step = this.defaultStep();
     this.render();
     this.syncTimers();
+    if (WS.active === this.key) this.startPresence();
   }
   async reload() {
     await this.flushAll();
@@ -1509,7 +1721,7 @@ class RunView {
   review() { return ((this.run.review || (this.run.review = {})).findings) || (this.run.review.findings = {}); }
   labelA() { return (this.results().document_a || {}).label || this.inputs().document_a_label || "Set A"; }
   labelB() { return (this.results().document_b || {}).label || this.inputs().document_b_label || "Set B"; }
-  locked() { return !this.run.inputs_editable; }
+  locked() { return !this.run.inputs_editable || this.readOnly(); }
 
   syncTimers(stop = false) {
     clearInterval(this.pollTimer); this.pollTimer = null;
@@ -1545,7 +1757,10 @@ class RunView {
   }
 
   // ---- layout ---------------------------------------------------------
-  render() { this.renderHead(); this.renderStepper(); this.renderStep(); }
+  render() {
+    this.el.classList.toggle("readonly", !!this.readOnly());
+    this.renderHead(); this.renderStepper(); this.renderStep();
+  }
 
   renderHead() {
     const r = this.run;
@@ -1588,11 +1803,16 @@ class RunView {
       <span class="row">${avatar(r.created_by_name, "sm")} ${esc(r.created_by === App.me.id ? "You" : r.created_by_name)} &middot; created ${timeEl(r.created_at)}</span>
       ${r.updated_by_name ? `<span>edited ${timeEl(r.updated_at)} by ${esc(r.updated_by === App.me.id ? "you" : r.updated_by_name)}</span>` : ""}
       ${r.results && r.results.duration_seconds ? `<span>scan took ${fmtDuration(r.results.duration_seconds)}</span>` : ""}
+      ${this.readOnly() ? `<span class="badge role-viewer">View only</span>` : ""}
+      <span data-presence></span>
       <span data-save></span>`;
+    this.renderPresence();
     const btns = [];
-    if (ACTIVE.has(status)) btns.push(`<button class="btn danger" data-act="cancel">Cancel scan</button>`);
+    const ro = this.readOnly();
+    if (ACTIVE.has(status) && !ro) btns.push(`<button class="btn danger" data-act="cancel">Cancel scan</button>`);
+    for (const extra of RUN_HEAD_ACTIONS) { const h = extra(this); if (h) btns.push(h); }
     if (r.results) btns.push(`<a class="btn" href="/api/runs/${esc(r.id)}/bundle" data-act="bundle" title="Register + every RFI document">Download all (.zip)</a>`);
-    if (status === "complete") btns.push(`<button class="btn primary" data-act="clone" title="Make a new revision with these files and settings">Edit &amp; re-run</button>`);
+    if (status === "complete" && !ro) btns.push(`<button class="btn primary" data-act="clone" title="Make a new revision with these files and settings">Edit &amp; re-run</button>`);
     btns.unshift(`<button class="btn" data-act="menu" aria-label="More">&#8943;</button>`);
     acts.innerHTML = btns.join("");
   }
@@ -1633,6 +1853,7 @@ class RunView {
   }
 
   lockedBanner() {
+    if (this.readOnly()) return `<div class="banner info"><span class="grow"><strong>View only.</strong> You can read this revision and download its outputs.</span></div>`;
     if (!this.locked()) return "";
     if (ACTIVE.has(this.run.status)) return `<div class="banner info"><span class="spinner"></span><span class="grow">A scan is running with these inputs, so they can't be changed right now.</span></div>`;
     return `<div class="banner info"><span class="grow"><strong>These inputs are locked</strong> because this revision has been scanned.
@@ -2313,13 +2534,17 @@ class RunView {
   rfiSaver(no) {
     if (!this.rfiSavers.has(no)) {
       const indicator = (s, err) => { const n = $("[data-rfi-save]", this.el); if (n && this.selectedRfi === no) n.innerHTML = saveStateHtml(s, err); };
-      this.rfiSavers.set(no, new Saver((patch) => api(`/api/runs/${this.id}/rfis/${encodeURIComponent(no)}`, { method: "PUT", body: patch }).then((server) => {
+      this.rfiSavers.set(no, new Saver((patch) => {
+        const cur = (this.results().rfi_items || []).find((r) => r.rfi_no === no) || {};
+        return api(`/api/runs/${this.id}/rfis/${encodeURIComponent(no)}`, { method: "PUT", body: { ...patch, base_rev: cur.rev || 0 } })
+          .catch((err) => this.onRfiConflict(no, err, patch)).then((server) => {
         const local = (this.results().rfi_items || []).find((r) => r.rfi_no === no);
-        if (local) for (const k of ["edited_by", "edited_at", "docx_stale", "original", "description"]) local[k] = server[k];
+        if (local && server) for (const k of ["edited_by", "edited_at", "docx_stale", "original", "description", "rev"]) local[k] = server[k];
         this.renderRfiList();
         if (this.selectedRfi === no) this.renderRfiActions();
         return server;
-      }), { delay: 800, onState: indicator }));
+      });
+      }, { delay: 800, onState: indicator }));
     }
     return this.rfiSavers.get(no);
   }
@@ -2485,6 +2710,10 @@ class RunView {
       this.renderFindingList();
       return;
     }
+    if (this.readOnly() && t.closest("[data-triage] button, [data-new-rfi], [data-move], [data-remove], [data-act=start], [data-act=clone], [data-act=register], [data-act=add-rfi], [data-act=docx-all], [data-act=docx], [data-act=revert-rfi], [data-act=delete-rfi], [data-act=clear-meta]")) {
+      toast("You have view-only access to this project.", { timeout: 2500 });
+      return;
+    }
     const tri = t.closest("[data-triage] button");
     if (tri) { this.setFinding(tri.closest("[data-triage]").dataset.triage, { status: tri.dataset.v }); return; }
     const gotoRfi = t.closest("[data-goto-rfi]");
@@ -2561,7 +2790,7 @@ class RunView {
       else if (k === "j") { e.preventDefault(); this.focusFinding(1); }
       else if (k === "k") { e.preventDefault(); this.focusFinding(-1); }
       else if (k === "enter" && this.focusId) { e.preventDefault(); this.toggleFinding(this.focusId); }
-      else if (this.focusId && (k === "a" || k === "d" || k === "u")) {
+      else if (this.focusId && (k === "a" || k === "d" || k === "u") && !this.readOnly()) {
         e.preventDefault();
         this.setFinding(this.focusId, { status: { a: "accepted", d: "dismissed", u: "open" }[k] }).then(() => { if (k !== "u") this.focusFinding(1); });
       }
@@ -2573,6 +2802,27 @@ class RunView {
     }
   }
 }
+
+// =====================================================================
+// Extension points (admin console, RFI log, collaboration... in other files)
+// =====================================================================
+
+const VIEW_TYPES = { home: HomeView, project: ProjectView, run: RunView };
+const NAV_ITEMS = [];          // {key, label, icon, show(), open()}
+const PROJECT_ACTIONS = [];    // {key, label, show(p), run(p, view)}
+const PROJECT_MENU_ITEMS = []; // (p) => menu item
+const PROJECT_SECTIONS = [];   // (view, container) => void
+const RUN_HEAD_ACTIONS = [];   // (runView) => html
+const PALETTE_ITEMS = [];      // () => [{label, sub, run}]
+const BOOT_HOOKS = [];         // async () => void, after sign-in
+
+window.CS = {
+  $, $$, esc, el, debounce, api, uploadFiles, toast, toastError, modal, confirmDialog, promptDialog, popMenu, closeMenus,
+  timeEl, timeAgo, fmtDate, fmtBytes, fmtDuration, plural, avatar, statusBadge, sevChips, autoGrow, saveStateHtml,
+  Saver, App, WS, Sidebar, Jobs, refreshProjects, refreshSoon, savePrefs, canRole, isAdmin, ROLE_LABEL, STEPS,
+  cloneRun, membersDialog, RunView, ProjectView, HomeView,
+  VIEW_TYPES, NAV_ITEMS, PROJECT_ACTIONS, PROJECT_MENU_ITEMS, PROJECT_SECTIONS, RUN_HEAD_ACTIONS, PALETTE_ITEMS, BOOT_HOOKS,
+};
 
 // =====================================================================
 // Global keyboard + boot
@@ -2649,11 +2899,14 @@ async function boot() {
   $("#app").hidden = false;
   renderUser();
   initShell();
-  await Promise.all([refreshProjects(), loadTemplate()]);
+  Sidebar.renderNav();
+  await Promise.all([refreshProjects(), loadTemplate(), ...BOOT_HOOKS.map((h) => Promise.resolve(h()).catch(() => {}))]);
   WS.restore();
   Jobs.poll();
+  if (App.me.must_change_password) forcePasswordChange();
 }
 
-boot();
+// Other modules (admin.js, rfilog.js, ...) load after this file and register first.
+document.addEventListener("DOMContentLoaded", boot);
 
 })();

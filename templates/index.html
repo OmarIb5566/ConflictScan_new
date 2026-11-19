@@ -38,6 +38,7 @@
         <input name="username" autocomplete="username" required autofocus></label>
       <label class="field" data-register><span>Display name</span>
         <input name="display_name" autocomplete="name" placeholder="How your name appears on runs and edits"></label>
+      <p class="hint" id="auth-dir-hint" hidden>Use your company (Windows) sign-in, e.g. DOMAIN\username.</p>
       <label class="field"><span>Password</span>
         <input name="password" type="password" autocomplete="current-password" required></label>
       <label class="row small muted" data-login style="gap:6px;">
@@ -102,5 +103,6 @@
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script src="/static/app.js"></script>
+<script src="/static/admin.js"></script>
 </body>
 </html>

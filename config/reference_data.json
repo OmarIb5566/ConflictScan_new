@@ -1,0 +1,8 @@
+{
+  "_comment": "Local stand-in for the company project register and employee directory. Replace with IT's real source (CONFLICTSCAN_REFERENCE=sql) or edit this file. These entries are samples.",
+  "projects": [
+    {"code": "SAMPLE-001", "name": "Sample Project - Tower A", "client": "Sample Client", "consultant": "Sample Consultant", "location": "New Cairo"},
+    {"code": "SAMPLE-002", "name": "Sample Project - Depot", "client": "Sample Employer", "consultant": "Sample Engineer", "location": "Alexandria"}
+  ],
+  "employees": []
+}

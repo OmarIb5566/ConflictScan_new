@@ -9,3 +9,4 @@ graphify-out/
 data/
 RFI training data/
 debug_logs/
+conflictscan.toml

@@ -1,0 +1,92 @@
+# ConflictScan settings - copy to conflictscan.toml (next to the code) and edit.
+# Every value can also be set as an environment variable, which wins over this file
+# (names in config.py). Lines starting with # are examples / defaults.
+
+[server]
+host = "127.0.0.1"            # 0.0.0.0 to listen on the network without a reverse proxy
+port = 5000
+threads = 16
+https = false                 # true when users reach the app over HTTPS (Secure cookies, HSTS)
+behind_proxy = false          # true behind IIS / a load balancer (trust X-Forwarded-*)
+# allowed_origins = ["https://intranet.example.local"]
+# secret_key = "..."          # default: generated into data/secret_key - set it when running >1 web process
+embedded_worker = true        # false when worker.py runs as its own service
+
+[database]
+# One URL decides the engine. Default: SQLite file in data/conflictscan.db
+# url = "postgresql+psycopg2://conflictscan:PASSWORD@dbserver:5432/conflictscan"
+# url = "mssql+pyodbc://conflictscan:PASSWORD@dbserver/conflictscan?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+# url = "mssql+pyodbc://@dbserver/conflictscan?driver=ODBC+Driver+18+for+SQL+Server&trusted_connection=yes"
+schema = "conflictscan"       # ignored on SQLite
+
+[storage]
+# data_dir = "D:/ConflictScan/data"          # database (SQLite), scratch space, logs, secret key
+files_backend = "local"                     # local | s3
+# files_root = "\\\\fileserver\\ConflictScan"  # uploads and outputs (default: data_dir); UNC paths work
+# s3_endpoint = "https://minio.example.local:9000"
+# s3_bucket = "conflictscan"
+# s3_prefix = ""
+# s3_access_key = ""
+# s3_secret_key = ""
+
+[auth]
+mode = "local"                # local | ldap | ldap+local (keep a local admin as break-glass)
+allow_signup = false          # false: admins create accounts (the first account ever is always allowed)
+signup_approval = true        # when sign-up is on, new accounts wait for an admin
+idle_minutes = 480
+session_days = 14
+login_max_fails = 5
+min_password = 8
+
+[auth.ldap]
+# url = "ldaps://dc01.example.local:636"
+# domain = "EXAMPLE"                         # users type EXAMPLE\user or user@example.local
+# base_dn = "DC=example,DC=local"
+# user_filter = "(sAMAccountName={username})"
+# default_role = "viewer"
+# require_group = false
+# groups = { "CN=ConflictScan-Admins,OU=Groups,DC=example,DC=local" = "admin", "CN=ConflictScan-Engineers,OU=Groups,DC=example,DC=local" = "engineer" }
+
+[reference]
+backend = "local"             # local (config/reference_data.json) | sql | none
+# url = "mssql+pyodbc://reader:PASSWORD@erp/ERP?driver=ODBC+Driver+18+for+SQL+Server"
+# projects_query = "SELECT ProjectCode AS code, ProjectName AS name, ClientName AS client, Consultant AS consultant, City AS location FROM dbo.Projects WHERE ProjectName LIKE :q OR ProjectCode LIKE :q"
+
+[scans]
+workers = 1                   # scans at once per worker process
+max_attempts = 3              # retries when a model server does not answer
+max_upload_mb = 500
+max_file_mb = 200
+max_pdf_pages = 400
+max_files_per_set = 40
+debug_logs = true
+# daily_page_limit = 0        # fair use: pages per user per day (0 = unlimited)
+
+[retention]
+scratch_hours = 24
+finished_jobs_days = 30
+audit_days = 730
+debug_days = 30
+trash_days = 30
+
+[ollama]
+url = "http://localhost:11434"
+
+# One block per inference server. On the A100 host run one Ollama per GPU
+# (CUDA_VISIBLE_DEVICES=N, OLLAMA_HOST=127.0.0.1:1143N) and list each here.
+# [[model_servers]]
+# name = "gpu0"
+# url = "http://127.0.0.1:11434"
+# kind = "ollama"             # or "openai" (vLLM, llama.cpp server)
+# gpus = [0]
+# roles = ["page_triage", "ocr", "drawing_reader"]
+#
+# [[model_servers]]
+# name = "gpu1"
+# url = "http://127.0.0.1:11435"
+# gpus = [1]
+# roles = ["adjudicator", "drafter"]
+
+[fleet]
+mode = "staged"               # staged (one GPU, models take turns) | resident (A100: all loaded at once)
+# file = "config/fleet.toml"  # role -> model assignments (see config/fleet.toml)

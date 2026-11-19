@@ -4,7 +4,23 @@ import json
 import time
 import re
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+def local_url(url: str) -> str:
+    """On Windows 'localhost' tries IPv6 first and costs ~2 s per request; use the IPv4 loopback."""
+    return url.replace("://localhost", "://127.0.0.1")
+
+
+def ollama_base(url: str = None) -> str:
+    url = (url or os.environ.get("OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
+    for suffix in ("/api/chat", "/api/generate"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return local_url(url)
+
+
+OLLAMA_URL = ollama_base() + "/api/chat"
+# One keep-alive connection pool for every model call (no TCP handshake per call).
+http = requests.Session()
+http.mount("http://", requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=32))
 MODEL_NAME = os.environ.get("CONFLICTSCAN_TEXT_MODEL", "gemma4:e4b")
 
 # Ollama falls back to a small default context window when none is requested
@@ -44,7 +60,7 @@ class OllamaLLM:
                     time.sleep(wait_time)
 
                 print(f"[llm] Calling LLM...")
-                response = requests.post(
+                response = http.post(
                     self.url,
                     headers={"Content-Type": "application/json"},
                     data=json.dumps(payload),
@@ -130,7 +146,7 @@ class OllamaLLM:
         """Test if Ollama is running and model is loaded"""
         try:
             # List models
-            response = requests.get("http://localhost:11434/api/tags", timeout=5)
+            response = http.get(self.url.replace("/api/chat", "/api/tags"), timeout=5)
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 print(f"[llm] Available models: {[m['name'] for m in models]}")

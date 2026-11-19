@@ -950,3 +950,41 @@ details > summary:hover { color: var(--ink); }
   .files li { grid-template-columns: auto 1fr auto; }
   .files li .kind-wrap { grid-column: 2 / -1; }
 }
+
+/* ------------------------------------------------------------ platform (roles, admin, presence) */
+.badge.role-manager  { background: var(--accent-soft); color: var(--accent); }
+.badge.role-engineer { background: var(--surface-3); color: var(--ink-soft); }
+.badge.role-viewer   { background: var(--warn-soft); color: var(--warn); }
+.badge.user-active   { background: var(--ok-soft); color: var(--ok); }
+.badge.user-pending  { background: var(--warn-soft); color: var(--warn); }
+.badge.user-disabled { background: var(--surface-3); color: var(--muted); }
+.form-error.ok { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 4px 0 18px; overflow-x: auto; }
+.subtab { background: none; border: none; border-bottom: 2px solid transparent; padding: 9px 14px; font: 600 13px 'Inter', 'Segoe UI', system-ui, sans-serif;
+  color: var(--ink-soft); cursor: pointer; white-space: nowrap; }
+.subtab:hover { color: var(--ink); }
+.subtab.on { color: var(--accent); border-bottom-color: var(--accent); }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.card.health { margin: 0; padding: 14px 16px; }
+.card.health .hint { margin-top: 6px; word-break: break-word; }
+.dot-lg { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--muted); }
+.card.health.ok .dot-lg { background: var(--ok); }
+.card.health.info .dot-lg { background: var(--accent); }
+.card.health.bad { border-color: var(--danger); }
+.card.health.bad .dot-lg { background: var(--danger); }
+.member-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.member-list li { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border); }
+.member-list select { width: auto; }
+.presence { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 500; }
+.presence .avatar + .avatar { margin-left: -8px; box-shadow: 0 0 0 2px var(--surface); }
+.temp-pw { font-size: 20px; letter-spacing: 1px; padding: 12px 16px; background: var(--surface-3); border-radius: 8px; text-align: center; margin-top: 10px; user-select: all; }
+.nav-badge { margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px; font-size: 11px; padding: 0 6px; min-width: 18px; text-align: center; }
+.nav-badge:empty { display: none; }
+.side-nav a[data-nav-key] { display: flex; align-items: center; }
+.view.readonly [data-rf], .view.readonly [data-note], .view.readonly .slot-name { pointer-events: none; background: var(--surface-2, var(--surface)); }
+.view.readonly [data-triage], .view.readonly [data-new-rfi], .view.readonly [data-act=add-rfi], .view.readonly [data-act=docx-all],
+.view.readonly [data-act=docx], .view.readonly [data-act=revert-rfi], .view.readonly [data-act=delete-rfi] { display: none !important; }
+.member-add { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.member-add select[data-member-add] { flex: 1; min-width: 0; }
+.member-add select[data-member-new-role] { width: auto; flex: none; }
+.list select { min-width: 120px; }

@@ -8,6 +8,19 @@ langchain-core>=0.1.0
 # Web Framework
 flask>=2.3.0
 werkzeug>=2.3.0
+waitress>=3.0             # production web server (serve.py / Windows service)
+
+# Database (any engine via DATABASE_URL) and migrations
+SQLAlchemy>=2.0
+alembic>=1.13
+# Driver for the host's database - install the one that applies:
+#   psycopg2-binary>=2.9   PostgreSQL
+#   pyodbc>=5.0            SQL Server (with Microsoft ODBC Driver 18)
+
+# Optional adapters (install when the setting is used)
+#   ldap3>=2.9             Active Directory / LDAP sign-in       (auth.mode = "ldap")
+#   boto3>=1.34            S3-compatible object store (MinIO)    (storage.files_backend = "s3")
+#   pywin32>=306           Windows services (service/winservice.py)
 
 # Data processing (Excel reading, register export)
 pandas>=2.0.0

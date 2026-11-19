@@ -220,6 +220,77 @@ and the problem, followed by one line per source with its reference and its
 words in quotation marks, then one question per point. **Every RFI field is editable**. Edits save as you type. Click *Regenerate Word
 document* to write the revised RFI into that run's own exports folder.
 
+## Platform: users, roles, database, workers
+
+ConflictScan runs on the host company's own servers. It uses only local
+models and has no cloud services or Docker.
+
+- **One settings file.** Copy `conflictscan.example.toml` to `conflictscan.toml`.
+  Every option is documented there, and environment variables override it.
+- **Any database.** One `DATABASE_URL` setting picks the engine: SQLite by
+  default, PostgreSQL or SQL Server in production. The schema is created and
+  upgraded by Alembic migrations (`python manage.py init`). The design rules
+  that keep it portable are listed in `db.py`.
+- **Files by key.** The database stores relative keys, never absolute paths.
+  The file store can be a local folder, a network share (UNC path) or an
+  S3-compatible store such as MinIO.
+- **Users and roles.** Accounts are created by an administrator; open sign-up
+  is off.
+
+  | Role | Can do |
+  |---|---|
+  | Admin | Everything, plus the admin console |
+  | Project manager | Manage members, delete projects, issue RFIs |
+  | Engineer | Upload files, run scans, triage findings, edit RFIs |
+  | Viewer | Read and download only |
+
+  - Private projects are visible to their members only.
+  - A project's *Members* dialog can give a person a different role inside
+    that one project.
+- **Directory sign-in.** Set `auth.mode = "ldap"` (or `"ldap+local"`) to sign
+  in with Active Directory. AD groups map to roles, and the directory's
+  permanent id keeps a renamed account's history.
+- **Job queue.** Scans are rows in the database, and any number of worker
+  processes claim them atomically.
+  - Workers send heartbeats; if one crashes, its scans go back to the queue.
+  - If a model server doesn't answer, the scan is retried with back-off.
+  - Admins can cancel a scan or move it to the top of the queue.
+- **Edit protection.** If two people edit the same RFI, the second save is
+  stopped and the person chooses whose version to keep. Each revision shows
+  who else is viewing it.
+- **Audit log.** Sign-ins, project and member changes, scans, triage, RFI
+  edits and every download are recorded.
+- **Admin console** (sidebar, admins only): users, scan queue, system health
+  (database, files, sign-in, reference data, model servers, GPUs), audit log
+  and effective settings.
+
+### Running it in production (Windows, no Docker)
+
+```powershell
+python manage.py init                      # create / upgrade the database
+python manage.py create-admin admin        # first administrator
+python serve.py                            # web server (waitress)
+python worker.py                           # scan worker (one per GPU server)
+.\service\install_services.ps1 -Python <venv>\Scripts\python.exe   # both as Windows services
+```
+
+HTTPS is handled by IIS in front of the app (`service/iis-web.config`). Set
+`server.https` and `server.behind_proxy` to `true` when running behind it.
+
+### Moving the data to another database
+
+```powershell
+python manage.py backup move.zip           # every table + every file, with checksums
+# point DATABASE_URL / storage.files_root at the new server, then:
+python manage.py restore move.zip          # loads, then verifies every table's checksum
+python manage.py verify move.zip           # compare any time
+python manage.py sql --url "mssql+pyodbc://"   # the schema as plain SQL for the DBA
+```
+
+A restore that doesn't match the export's checksums is rolled back, so it
+changes nothing. A first-release SQLite database is detected and imported
+automatically at start-up; the old file is kept beside it.
+
 ## API
 
 Workspace endpoints used by the web app. They need a signed-in session cookie
@@ -242,6 +313,13 @@ Workspace endpoints used by the web app. They need a signed-in session cookie
 | `/api/runs/<id>/docx-all`, `/register` | POST | Regenerate every RFI document / the register with edits |
 | `/api/runs/<id>/exports/<file>`, `/bundle` | GET | Download one output / everything as a .zip |
 | `/api/jobs` | GET | Your queued/running scans and ones that finished recently |
+| `/api/projects/<id>/members[/<uid>]` | GET, PUT, DELETE | Project members and their roles |
+| `/api/presence` | POST | "Who else is viewing this" heartbeat |
+| `/api/reference/projects?q=` | GET | Company project register (read-only) |
+| `/api/admin/users[/<id>]` | GET, POST, PATCH | Admin: accounts, roles, approval, disabling |
+| `/api/admin/users/<id>/reset-password` | POST | Admin: temporary password |
+| `/api/admin/queue[/<job>]` | GET, POST | Admin: scan queue; cancel / move to top |
+| `/api/admin/health`, `/audit`, `/settings` | GET | Admin: system health, audit log, effective settings |
 
 | `/api/rfi-template` | GET | Which RFI form is in use, and its `{{tokens}}` |
 | `/` | GET | Web interface (no sign-in) |
@@ -267,8 +345,18 @@ To call the pipeline directly from Python, without the web app, use
 ```
 ConflictScan_RFI_automation/
 ├── api.py                    # Flask API: accounts, projects, runs, result editing
-├── storage.py                # SQLite store: users, prefs, projects, runs, run files
-├── jobs.py                   # background scan queue, live progress, cancel, upload checks
+├── admin_api.py              # admin console API
+├── webcore.py                # sign-in / role checks, audit helper, conflict-safe updates
+├── config.py                 # loads conflictscan.toml (see conflictscan.example.toml)
+├── db.py                     # engine-neutral tables + DATABASE_URL
+├── storage.py                # all database access (SQLAlchemy Core)
+├── migrations/               # Alembic schema migrations
+├── adapters/                 # identity (local/LDAP), files (local/share/S3), reference data, model servers
+├── jobs.py                   # database job queue, workers, live progress, retries, upload checks
+├── worker.py, serve.py       # scan worker process; production web server (waitress)
+├── manage.py, datamove.py    # admin commands: init, sql, export/import, backup/restore, verify
+├── maintenance.py            # retention clean-up
+├── service/                  # Windows services, IIS reverse-proxy config
 ├── security.py               # same-origin, CSRF, session timeout, sign-in throttling, headers
 ├── upload_checks.py          # file type sniffing, size/page limits, unsafe-file detection
 ├── graph.py                  # LangGraph builder + run_conflict_scan()
@@ -299,6 +387,8 @@ ConflictScan_RFI_automation/
 │
 ├── templates/index.html      # Web interface shell
 ├── static/app.js, app.css    # Web interface (no build step)
+├── static/admin.js           # admin console
+├── config/reference_data.json  # local stand-in for the company project register
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
 └── data/                     # conflictscan.db, runs/<run>/inputs|exports|debug, scratch/ (git-ignored)
 ```

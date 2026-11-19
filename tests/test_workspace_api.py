@@ -23,6 +23,9 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 os.environ["CONFLICTSCAN_DATA_DIR"] = tempfile.mkdtemp(prefix="cs_test_data_")
 os.environ["CONFLICTSCAN_SECRET_KEY"] = "test"
+os.environ.setdefault("CONFLICTSCAN_ALLOW_SIGNUP", "1")
+os.environ.setdefault("CONFLICTSCAN_SIGNUP_APPROVAL", "0")
+os.environ.setdefault("CONFLICTSCAN_RETRY_SECONDS", "1")
 
 import api      # noqa: E402
 import graph    # noqa: E402

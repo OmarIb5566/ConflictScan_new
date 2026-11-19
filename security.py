@@ -35,9 +35,7 @@ Windows compatible.
 import hmac
 import os
 import secrets
-import threading
 import time
-from collections import defaultdict, deque
 from datetime import timedelta
 
 from flask import jsonify, request, session
@@ -77,46 +75,42 @@ _CSP = "; ".join([
 
 
 # ---------------------------------------------------------------------------
-# Sign-in throttling (in memory; moves to the database with the job queue)
+# Sign-in throttling (stored in the database, so it holds across processes and restarts)
 # ---------------------------------------------------------------------------
 
 class LoginThrottle:
     def __init__(self, max_fails: int = LOGIN_MAX_FAILS, window: int = LOGIN_WINDOW):
         self.max_fails = max_fails
         self.window = window
-        self._fails = defaultdict(deque)
-        self._lock = threading.Lock()
 
-    def _recent(self, key, now):
-        q = self._fails[key]
-        while q and now - q[0] > self.window:
-            q.popleft()
-        return q
+    @staticmethod
+    def _keys(username: str, address: str):
+        return f"u:{(username or '').lower()}", f"ip:{address}"
 
     def retry_after(self, username: str, address: str) -> int:
         """Seconds until another attempt is allowed (0 = allowed now)."""
-        now = time.time()
-        with self._lock:
-            wait = 0
-            for key, limit in ((("u", username.lower()), self.max_fails), (("ip", address), self.max_fails * 4)):
-                q = self._recent(key, now)
-                if len(q) >= limit:
-                    wait = max(wait, int(self.window - (now - q[0])) + 1)
-            return wait
+        import storage
+        from datetime import datetime
+        since = storage.ago(seconds=self.window)
+        wait = 0
+        for key, limit in zip(self._keys(username, address), (self.max_fails, self.max_fails * 4)):
+            stamps = storage.login_failures_since(key, since)
+            if len(stamps) >= limit:
+                oldest = datetime.fromisoformat(stamps[-limit]).timestamp()
+                wait = max(wait, int(self.window - (time.time() - oldest)) + 1)
+        return wait
 
     def failed(self, username: str, address: str) -> None:
-        now = time.time()
-        with self._lock:
-            self._fails[("u", username.lower())].append(now)
-            self._fails[("ip", address)].append(now)
+        import storage
+        storage.record_login_failure(self._keys(username, address))
 
     def succeeded(self, username: str) -> None:
-        with self._lock:
-            self._fails.pop(("u", username.lower()), None)
+        import storage
+        storage.clear_login_failures(self._keys(username, "")[0])
 
     def reset(self) -> None:
-        with self._lock:
-            self._fails.clear()
+        import storage
+        storage.clear_login_failures()
 
 
 login_throttle = LoginThrottle()
