@@ -14,6 +14,8 @@ ConflictScan administration commands
     python manage.py restore IN.zip [--replace]  restore a backup (database + files)
     python manage.py purge                       apply the retention settings now
     python manage.py check-files                 list run files missing from storage
+    python manage.py index-rfis FOLDER           add past RFIs (+ client replies) to the RFI memory
+    python manage.py fleet                       the AI fleet: profile, role -> model, what is installed
 
 Moving to the host company's database:
     1. python manage.py backup move.zip                         (on the workstation)
@@ -55,6 +57,11 @@ def main(argv=None):
     v.add_argument("src")
     sub.add_parser("purge")
     sub.add_parser("check-files")
+    ix = sub.add_parser("index-rfis")
+    ix.add_argument("folder")
+    ix.add_argument("--no-replies", action="store_true")
+    ix.add_argument("--source", default="training")
+    sub.add_parser("fleet")
     args = p.parse_args(argv)
 
     if args.cmd == "sql":
@@ -127,6 +134,31 @@ def main(argv=None):
     elif args.cmd == "purge":
         import maintenance
         print(maintenance.run_all())
+    elif args.cmd == "index-rfis":
+        from fleet import corpus, memory
+        from nodes.rfi_knowledge import classify_text
+        records = corpus.load_rfis(args.folder, with_replies=not args.no_replies)
+        for rec in records:
+            try:
+                classes = classify_text(f"{rec['subject']} {rec['text']}")
+                rec["issue_class"] = classes[0][0] if classes else None
+            except Exception:  # noqa: BLE001
+                rec["issue_class"] = None
+        n = memory.add(records, source=args.source)
+        print(f"Indexed {n} RFI(s) from {args.folder} into the RFI memory ({memory.count()}).")
+        if not records:
+            print("Nothing found - expected <folder>/<project>/<RFI folders or an RFI log>.")
+    elif args.cmd == "fleet":
+        from fleet import client, profile
+        prof = profile.active()
+        print(f"Profile: {prof['name']} ({prof['mode']})  features: "
+              + ", ".join(f for f in profile.FEATURES if prof.get(f)))
+        for role_name in sorted(prof["roles"]):
+            cfg = profile.role(role_name)
+            got = client.resolved_model(role_name)
+            want = cfg["model"]
+            note = "" if got == want or (got or "").startswith(want.split(":")[0]) else f"  (wanted {want})"
+            print(f"  {role_name:17s} -> {got or 'NOT AVAILABLE'}{note}")
     elif args.cmd == "check-files":
         import datamove
         missing = datamove.missing_files()

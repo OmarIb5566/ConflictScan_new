@@ -283,7 +283,6 @@ def build_results(result_state: Dict[str, Any], files_a: list, files_b: list, ex
         "rfi_items": rfi_items,
         "register_file": _move_into(result_state.get("register_path"), export_dir),
         "steps_executed": result_state.get("step_history", []),
-        "fleet": result_state.get("fleet_report"),
     }
 
 
@@ -378,6 +377,8 @@ def _execute_scan(job: Dict[str, Any]) -> None:
     storage.update_run(run_id, status="running", started_at=storage.now(), bump=False)
     install_log_capture()      # again here, in case something replaced sys.stdout since startup
     token = _current_run.set(run_id)
+    from fleet import current_run as fleet_run
+    fleet_token = fleet_run.set(run_id)          # every model call is logged against this scan
     work_dir = tempfile.mkdtemp(prefix=f"job_{job['id']}_", dir=_scratch_root())
     started = time.time()
     outcome, error = "done", None
@@ -434,6 +435,7 @@ def _execute_scan(job: Dict[str, Any]) -> None:
 
         results = build_results(result_state, files_a, files_b, storage.run_dir(run_id, "exports"))
         results["duration_seconds"] = round(time.time() - started)
+        results["fleet"] = fleet_report(run_id)
         results = _finalise_results(run, project, results)
         _log(run_id, f"Done: {len(results['discrepancies'])} finding(s), {len(results['rfi_items'])} RFI(s)")
         _persist_progress(run_id)
@@ -468,11 +470,33 @@ def _execute_scan(job: Dict[str, Any]) -> None:
             _after_scan(run_id, outcome)
     finally:
         _current_run.reset(token)
+        fleet_run.reset(fleet_token)
         shutil.rmtree(work_dir, ignore_errors=True)
         with _live_lock:
             _live.pop(run_id, None)
     if outcome != "retry":
         storage.finish_job(job["id"], outcome, error=error)
+
+
+def fleet_report(run_id: str) -> Dict[str, Any]:
+    """Which model did which job in this scan, how many calls, how long, how many from the cache."""
+    try:
+        from sqlalchemy import Integer, func, select
+        from db import model_calls
+        from fleet import profile
+        with storage.tx() as conn:
+            rows = conn.execute(select(model_calls.c.role, model_calls.c.model, func.count(), func.sum(model_calls.c.ms),
+                                       func.sum(model_calls.c.cached.cast(Integer)),
+                                       func.sum(model_calls.c.prompt_tokens), func.sum(model_calls.c.output_tokens))
+                                .where(model_calls.c.run_id == run_id).group_by(model_calls.c.role, model_calls.c.model)).all()
+        roles = [{"role": r[0], "model": r[1], "calls": r[2], "seconds": round((r[3] or 0) / 1000, 1),
+                  "cached": int(r[4] or 0), "prompt_tokens": int(r[5] or 0), "output_tokens": int(r[6] or 0)}
+                 for r in rows]
+        return {"profile": profile.active_name(), "mode": profile.active()["mode"], "roles": roles,
+                "calls": sum(x["calls"] for x in roles), "cached": sum(x["cached"] for x in roles),
+                "model_seconds": round(sum(x["seconds"] for x in roles), 1)}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
 # Hooks later phases plug into (fleet options, carry-forward, notifications).

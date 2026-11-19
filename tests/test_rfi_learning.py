@@ -339,6 +339,12 @@ def test_dxf_pairs_with_same_named_pdf():
 # Full graph run over two multi-file sets, LLM stubbed
 # ---------------------------------------------------------------------------
 
+def _stub_fleet(monkeypatch):
+    """Every model role answers with _fake_llm (no model server needed)."""
+    from fleet.client import RoleLLM
+    monkeypatch.setattr(RoleLLM, "run", lambda self, system, user, temperature=0.2, **kw: _fake_llm(system, user, temperature))
+
+
 def _fake_llm(system, user, temperature=0.2, **_kw):
     """Deterministic stand-in for each prompt the pipeline sends."""
     if "ONE CHUNK" in system:
@@ -365,7 +371,7 @@ def _fake_llm(system, user, temperature=0.2, **_kw):
 
 def test_full_graph_on_two_file_sets(monkeypatch, tmp_path):
     import nodes.llm_client as llm
-    monkeypatch.setattr(llm.llm_client, "run", _fake_llm)
+    _stub_fleet(monkeypatch)
     monkeypatch.chdir(tmp_path)
 
     boq = tmp_path / "boq.txt"
@@ -400,7 +406,7 @@ def test_graph_streams_progress_and_can_stop(monkeypatch, tmp_path):
     """The web app's background worker path: per-node callbacks, same final state, cooperative stop."""
     import nodes.llm_client as llm
     from graph import run_conflict_scan, ScanCancelled
-    monkeypatch.setattr(llm.llm_client, "run", _fake_llm)
+    _stub_fleet(monkeypatch)
     monkeypatch.chdir(tmp_path)
     boq = tmp_path / "boq.txt"
     boq.write_text("Transformer TR4 rating | 1250 kVA | BOQ item 1.2 | TR4\n", encoding="utf-8")
@@ -429,7 +435,7 @@ def test_scan_writes_only_into_its_own_folders(monkeypatch, tmp_path):
     """Two scans never share an exports/ or debug_logs/ folder, and nothing lands in the working directory."""
     import nodes.llm_client as llm
     from graph import run_conflict_scan
-    monkeypatch.setattr(llm.llm_client, "run", _fake_llm)
+    _stub_fleet(monkeypatch)
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)

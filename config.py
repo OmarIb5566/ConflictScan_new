@@ -92,6 +92,7 @@ _ENV_MAP = {
     ("retention", "trash_days"): "CONFLICTSCAN_RETAIN_TRASH_DAYS",
     ("retention", "debug_days"): "CONFLICTSCAN_RETAIN_DEBUG_DAYS",
     ("ollama", "url"): "OLLAMA_URL",
+    ("fleet", "profile"): "CONFLICTSCAN_FLEET_PROFILE",
     ("fleet", "mode"): "CONFLICTSCAN_FLEET_MODE",
     ("fleet", "file"): "CONFLICTSCAN_FLEET_FILE",
 }

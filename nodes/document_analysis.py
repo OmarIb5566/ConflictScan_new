@@ -34,11 +34,9 @@ _llm_client_instance = None
 
 def _get_llm():
     """Return the shared Ollama llm_client, importing it once on first call."""
-    global _llm_client_instance
-    if _llm_client_instance is None:
-        from nodes.llm_client import llm_client
-        _llm_client_instance = llm_client
-    return _llm_client_instance
+    # The extractor role of the AI fleet (config/fleet.toml).
+    from fleet import llm
+    return llm("extractor")
 
 
 # ---------------------------------------------------------------------------
@@ -686,14 +684,18 @@ def build_document_profile(
         f"(size={CHUNK_SIZE:,}, overlap={CHUNK_OVERLAP}), scanning {len(chunks)}"
     )
 
-    chunk_results: List[Dict[str, Any]] = []
-    for scan_pos, chunk in enumerate(chunks, start=1):
+    from fleet import pmap
+
+    def _scan(args):
+        scan_pos, chunk = args
         print(
             f"[document_analysis]   -> '{label}' scanning {scan_pos}/{len(chunks)} "
             f"(chars {chunk['char_start']:,}-{chunk['char_end']:,})"
         )
-        result = _extract_chunk(chunk, label)
-        chunk_results.append(result)
+        return _extract_chunk(chunk, label)
+
+    chunk_results: List[Dict[str, Any]] = pmap(_scan, list(enumerate(chunks, start=1)), role="extractor")
+    for result in chunk_results:
         print(
             f"[document_analysis]      {len(result['requirements'])} requirement(s), "
             f"{len(result['quantities'])} quantity item(s)"
@@ -906,15 +908,22 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
     summaries: Dict[str, List[Dict[str, Any]]] = {"a": [], "b": []}
 
     # 1. Text documents (and pasted text) of both sets
-    for slot in ("a", "b"):
-        for idx, entry in enumerate(files[slot]):
-            if entry.get("kind") == "drawing":
-                continue
-            print(f"[analyze_documents] '{labels[slot]}' file {idx + 1}/{len(files[slot])}: {entry.get('name')} (document)")
-            profile, summary = _profile_text_file(entry, slot, labels[slot], review_focus)
-            _tag_items(profile, slot, entry.get("name") or "document", idx)
-            parts[slot].append(profile)
-            summaries[slot].append(summary)
+    # Files are profiled side by side when every model stays loaded (AI fleet "resident"
+    # mode); on a single GPU ("staged") one file at a time avoids swapping models.
+    from fleet import pmap, profile as fleet_profile
+    text_jobs = [(slot, idx, entry) for slot in ("a", "b") for idx, entry in enumerate(files[slot])
+                 if entry.get("kind") != "drawing"]
+
+    def _profile_job(job):
+        slot, idx, entry = job
+        print(f"[analyze_documents] '{labels[slot]}' file {idx + 1}/{len(files[slot])}: {entry.get('name')} (document)")
+        return _profile_text_file(entry, slot, labels[slot], review_focus)
+
+    workers = 4 if fleet_profile.active()["mode"] == "resident" else 1
+    for (slot, idx, entry), (profile, summary) in zip(text_jobs, pmap(_profile_job, text_jobs, workers=workers)):
+        _tag_items(profile, slot, entry.get("name") or "document", idx)
+        parts[slot].append(profile)
+        summaries[slot].append(summary)
 
     text_profiles = {slot: _merge_set(slot, labels[slot], parts[slot], summaries[slot]) for slot in ("a", "b")}
     final: Dict[str, Dict[str, Any]] = {}

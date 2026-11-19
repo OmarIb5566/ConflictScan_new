@@ -41,11 +41,9 @@ _llm_client_instance = None
 
 def _get_llm():
     """Return the shared Ollama llm_client, importing it once on first call."""
-    global _llm_client_instance
-    if _llm_client_instance is None:
-        from nodes.llm_client import llm_client
-        _llm_client_instance = llm_client
-    return _llm_client_instance
+    # The drafter role of the AI fleet (config/fleet.toml).
+    from fleet import llm
+    return llm("drafter")
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +295,17 @@ def _draft_groups(
 
     style = load_taxonomy().get("rfi_style") or {}
     examples = "\n".join(f"- {e}" for e in style.get("example_points") or [])
+    # Company memory (AI fleet): how similar past RFIs were worded - style only, never facts.
+    try:
+        from fleet.memory import style_examples
+        query = " ".join(f"{d.get('topic') or ''} {d.get('description') or ''}" for _g, items in batch for d in items)
+        past = style_examples(query[:2000], k=2)
+    except Exception as exc:  # noqa: BLE001 - memory is optional
+        print(f"[rfi_drafting] RFI memory unavailable: {exc}")
+        past = ""
     try:
         result = _get_llm().run(
-            system=_DRAFT_SYSTEM.format(style=rfi_style_prompt(), examples=examples or "-"),
+            system=_DRAFT_SYSTEM.format(style=rfi_style_prompt(), examples=examples or "-") + past,
             user="\n".join(lines),
             temperature=0.2,
         )
@@ -582,9 +588,15 @@ def rfi_drafting_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         batch_points += len(items)
     if batch:
         batches.append(batch)
-    for n, b in enumerate(batches, start=1):
+    from fleet import pmap
+
+    def _draft(args):
+        n, b = args
         print(f"[rfi_drafting]   -> drafting batch {n}/{len(batches)} ({len(b)} RFI(s))")
-        drafted.update(_draft_groups(b, label_a, label_b, project_name, precedence))
+        return _draft_groups(b, label_a, label_b, project_name, precedence)
+
+    for part in pmap(_draft, list(enumerate(batches, start=1)), role="drafter"):
+        drafted.update(part)
 
     # --- Assemble the RFI records -----------------------------------------
     due_date = (datetime.now() + timedelta(days=DEFAULT_RESPONSE_DAYS)).strftime("%d %B %Y")

@@ -2215,6 +2215,10 @@ class RunView {
           <dt>Precedence</dt><dd>${esc(inp.document_precedence) || '<span class="muted">Not stated</span>'}</dd>
           <dt>RFI drafting</dt><dd>${inp.rfi_grouping === "single" ? "One RFI per finding" : "Related findings grouped"}</dd>
         </dl>
+        ${res.fleet && (res.fleet.roles || []).length ? `<details style="margin-top:14px"><summary>AI models used (${esc(res.fleet.profile)} profile &middot; ${res.fleet.calls} calls${res.fleet.cached ? `, ${res.fleet.cached} from cache` : ""})</summary>
+          <table class="list compact" style="margin-top:8px"><thead><tr><th>Job</th><th>Model</th><th>Calls</th><th>Model time</th></tr></thead><tbody>
+          ${res.fleet.roles.map((x) => `<tr><td>${esc(x.role.replace(/_/g, " "))}</td><td class="mono small">${esc(x.model)}</td><td>${x.calls}${x.cached ? ` <span class="muted">(${x.cached} cached)</span>` : ""}</td><td>${fmtDuration(x.seconds)}</td></tr>`).join("")}
+          </tbody></table></details>` : ""}
         ${(res.steps_executed || []).length ? `<details style="margin-top:14px"><summary>Pipeline steps (${res.steps_executed.length})</summary>
           <ul class="small" style="margin:8px 0 0">${res.steps_executed.map((s) => `<li>${esc(s)}</li>`).join("")}</ul></details>` : ""}
         ${log.length ? `<details style="margin-top:10px"><summary>Scan log</summary><pre class="log">${log.map(esc).join("\n")}</pre></details>` : ""}
@@ -2262,7 +2266,7 @@ class RunView {
         <div class="search-box" style="max-width:280px"><input type="search" data-fq value="${esc(f.q)}" placeholder="Search findings (/)"></div>
         <span data-sevchips></span>
         <select data-fstatus aria-label="Status filter">
-          ${[["all", "Any status"], ["open", "Open"], ["accepted", "Accepted"], ["dismissed", "Dismissed"]].map(([v, l]) => `<option value="${v}" ${f.status === v ? "selected" : ""}>${l}</option>`).join("")}
+          ${[["all", "Any status"], ["open", "Open"], ["accepted", "Accepted"], ["dismissed", "Dismissed"], ["disputed", "Disputed by second opinion"]].map(([v, l]) => `<option value="${v}" ${f.status === v ? "selected" : ""}>${l}</option>`).join("")}
         </select>
         <select data-fscope aria-label="Scope filter">
           <option value="all">Any scope</option>
@@ -2317,7 +2321,7 @@ class RunView {
     const terms = f.q.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const all = this.results().discrepancies || [];
     const base = all.filter((d) => {
-      if (f.status !== "all" && this.statusOf(d) !== f.status) return false;
+      if (f.status === "disputed" ? !d.disputed : (f.status !== "all" && this.statusOf(d) !== f.status)) return false;
       if (f.scope !== "all" && (d.scope || "between") !== f.scope) return false;
       if (f.cls !== "all" && d.issue_class !== f.cls) return false;
       if (terms.length) {
@@ -2387,6 +2391,8 @@ class RunView {
           ${d.issue_class ? `<span class="badge class">${esc(classes[d.issue_class] || d.issue_class.replace(/_/g, " "))}</span>` : ""}
           ${scope ? `<span class="badge scope">${esc(scope)}</span>` : ""}
           ${d.low_confidence ? `<span class="badge verify" title="Rests on OCR text or partly legible drawing values">verify</span>` : ""}
+          ${d.disputed ? `<span class="badge disputed" title="${esc((d.verification || {}).reason || "An independent model judged this not to be a real conflict")}">second opinion: not a conflict</span>`
+            : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent model (${esc(d.verification.model || "")})">&#10003; double-checked</span>` : ""}
           ${status !== "open" ? `<span class="badge ${status === "accepted" ? "ok" : "outline"}">${esc(status)}</span>` : ""}
           ${rv.note ? `<span class="badge outline" title="${esc(rv.note)}">note</span>` : ""}
           ${rfis.map((no) => `<button class="badge outline" data-goto-rfi="${esc(no)}" title="Open ${esc(no)}">${esc(no)}</button>`).join("")}
@@ -2398,6 +2404,9 @@ class RunView {
         <p>${esc(d.description)}</p>
         <div class="side-by-side" style="grid-template-columns:repeat(${cols.length},1fr)">${cols.map((c) => `<div class="${c.cls}"><div class="side-label">${c.title}</div>${c.body}</div>`).join("")}</div>
         ${d.impact ? `<p><strong>Impact:</strong> ${esc(d.impact)}</p>` : ""}
+        ${d.verification ? `<p class="second-opinion ${d.disputed ? "disputed" : ""}"><strong>Second opinion</strong> (${esc(d.verification.model || "independent model")}):
+          ${esc({ confirmed: "confirmed", not_a_conflict: "not a real conflict", unsure: "unsure" }[d.verification.verdict] || d.verification.verdict)}
+          ${d.verification.reason ? `&mdash; ${esc(d.verification.reason)}` : ""}${d.vote ? ` <span class="muted">(vote ${d.vote.for} for / ${d.vote.against} against)</span>` : ""}</p>` : ""}
         ${d.suggested_question ? `<p><strong>Clarification sought:</strong> ${esc(d.suggested_question)}</p>` : ""}
         <div class="f-triage">
           <div class="segmented triage" data-triage="${esc(d.id)}">

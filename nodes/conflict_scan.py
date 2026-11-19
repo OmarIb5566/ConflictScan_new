@@ -56,11 +56,9 @@ _llm_client_instance = None
 
 def _get_llm():
     """Return the shared Ollama llm_client, importing it once on first call."""
-    global _llm_client_instance
-    if _llm_client_instance is None:
-        from nodes.llm_client import llm_client
-        _llm_client_instance = llm_client
-    return _llm_client_instance
+    # The adjudicator role of the AI fleet (config/fleet.toml).
+    from fleet import llm
+    return llm("adjudicator")
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +433,51 @@ def align_requirements(
     return pairs, unmatched_a, unmatched_b
 
 
+SEMANTIC_MIN_SIMILARITY = 0.82
+
+
+def semantic_pairs(
+    unmatched_a: List[Dict[str, Any]],
+    unmatched_b: List[Dict[str, Any]],
+) -> Tuple[List[Tuple[Dict, Dict]], List[Dict], List[Dict]]:
+    """
+    Second alignment pass by MEANING (embedder role, bge-m3) for statements the
+    keyword pass could not pair - e.g. "dry-pipe sprinkler" vs "pre-action
+    system", or English vs Arabic wording. The same location gate applies, and
+    each statement is used at most once (best matches first).
+    """
+    from fleet import embed, profile
+    if not profile.feature("semantic_matching") or not unmatched_a or not unmatched_b:
+        return [], unmatched_a, unmatched_b
+    import numpy as np
+
+    def text(r):
+        return f"{r.get('topic') or ''}: {r.get('statement') or ''} {r.get('value') if r.get('value') is not None else ''}"
+
+    va, vb = embed([text(r) for r in unmatched_a]), embed([text(r) for r in unmatched_b])
+    ia = [i for i, v in enumerate(va) if v]
+    ib = [j for j, v in enumerate(vb) if v]
+    if not ia or not ib:
+        return [], unmatched_a, unmatched_b
+    A = np.array([va[i] for i in ia], dtype=float)
+    B = np.array([vb[j] for j in ib], dtype=float)
+    A /= np.linalg.norm(A, axis=1, keepdims=True) + 1e-9
+    B /= np.linalg.norm(B, axis=1, keepdims=True) + 1e-9
+    sims = A @ B.T
+    cand = [(sims[x, y], ia[x], ib[y]) for x, y in zip(*np.where(sims >= SEMANTIC_MIN_SIMILARITY))]
+    cand.sort(key=lambda c: -c[0])
+    used_a, used_b, pairs = set(), set(), []
+    for score, i, j in cand:
+        if i in used_a or j in used_b or not _comparable(unmatched_a[i], unmatched_b[j]):
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        pairs.append((unmatched_a[i], unmatched_b[j]))
+    rest_a = [r for i, r in enumerate(unmatched_a) if i not in used_a]
+    rest_b = [r for j, r in enumerate(unmatched_b) if j not in used_b]
+    return pairs, rest_a, rest_b
+
+
 # ---------------------------------------------------------------------------
 # 2. Pair review - LLM
 # ---------------------------------------------------------------------------
@@ -525,7 +568,8 @@ def _review_pairs(
     system = _PAIR_SYSTEM + _issue_rules(_PAIR_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
     total_batches = (len(pairs) + PAIR_BATCH_SIZE - 1) // PAIR_BATCH_SIZE
 
-    for batch_no in range(total_batches):
+    def _one(batch_no):
+        part: List[Dict[str, Any]] = []
         batch = pairs[batch_no * PAIR_BATCH_SIZE: (batch_no + 1) * PAIR_BATCH_SIZE]
 
         lines = [f"SET A = {label_a}", f"SET B = {label_b}"]
@@ -550,7 +594,7 @@ def _review_pairs(
             result = _get_llm().run(system=system, user="\n".join(lines), temperature=0.1)
         except Exception as exc:
             print(f"[conflict_scan] pair batch {batch_no} failed: {exc}")
-            continue
+            return part
 
         for disc in result.get("discrepancies") or []:
             if not isinstance(disc, dict):
@@ -563,8 +607,12 @@ def _review_pairs(
             _attach_pair_evidence(disc, ra, rb, label_a, label_b)
             if ra.get("value") in (None, "") or rb.get("value") in (None, ""):
                 disc["interpretive"] = True     # no value on one side - not a demonstrated value conflict
-            found.append(disc)
+            part.append(disc)
+        return part
 
+    from fleet import pmap
+    for part in pmap(_one, range(total_batches), role="adjudicator"):
+        found.extend(part)
     return found
 
 
@@ -661,7 +709,8 @@ def _review_internal(pairs: List[Tuple[Dict, Dict]], label: str, slot: str, revi
         return found
     system = _INTERNAL_SYSTEM + _issue_rules(_INTERNAL_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
     total_batches = (len(pairs) + PAIR_BATCH_SIZE - 1) // PAIR_BATCH_SIZE
-    for batch_no in range(total_batches):
+    def _one(batch_no):
+        part: List[Dict[str, Any]] = []
         batch = pairs[batch_no * PAIR_BATCH_SIZE: (batch_no + 1) * PAIR_BATCH_SIZE]
         lines = [f"DOCUMENT SET: {label}"]
         if review_focus:
@@ -681,7 +730,7 @@ def _review_internal(pairs: List[Tuple[Dict, Dict]], label: str, slot: str, revi
             result = _get_llm().run(system=system, user="\n".join(lines), temperature=0.1)
         except Exception as exc:
             print(f"[conflict_scan] internal batch {batch_no} failed: {exc}")
-            continue
+            return part
         for disc in result.get("discrepancies") or []:
             if not isinstance(disc, dict):
                 continue
@@ -691,7 +740,12 @@ def _review_internal(pairs: List[Tuple[Dict, Dict]], label: str, slot: str, revi
             r1, r2 = pairs[idx]
             disc.setdefault("issue_class", "internal_inconsistency")
             _attach_internal_evidence(disc, [r1, r2], label, slot)
-            found.append(disc)
+            part.append(disc)
+        return part
+
+    from fleet import pmap
+    for part in pmap(_one, range(total_batches), role="adjudicator"):
+        found.extend(part)
     return found
 
 
@@ -839,7 +893,9 @@ def _review_interfaces(clusters: List[Dict[str, Any]], labels: Dict[str, str], r
                        drawing_mode: bool) -> List[Dict[str, Any]]:
     found: List[Dict[str, Any]] = []
     system = _INTERFACE_SYSTEM + _issue_rules(_INTERFACE_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
-    for n, cluster in enumerate(clusters, start=1):
+    def _one(args):
+        part: List[Dict[str, Any]] = []
+        n, cluster = args
         items = cluster["items"]
         lines = [f"PLACE: {cluster['key']}"]
         if review_focus:
@@ -858,7 +914,7 @@ def _review_interfaces(clusters: List[Dict[str, Any]], labels: Dict[str, str], r
             result = _get_llm().run(system=system, user="\n".join(lines), temperature=0.1)
         except Exception as exc:
             print(f"[conflict_scan] interface review {n} failed: {exc}")
-            continue
+            return part
         for disc in result.get("discrepancies") or []:
             if not isinstance(disc, dict):
                 continue
@@ -882,7 +938,12 @@ def _review_interfaces(clusters: List[Dict[str, Any]], labels: Dict[str, str], r
                 disc.setdefault("discipline", evidence_reqs[0].get("discipline") or "general")
                 if not disc.get("location"):
                     disc["location"] = next((_location_label(r) for r in evidence_reqs if _location_label(r)), "")
-            found.append(disc)
+            part.append(disc)
+        return part
+
+    from fleet import pmap
+    for part in pmap(_one, list(enumerate(clusters, start=1)), role="adjudicator"):
+        found.extend(part)
     return found
 
 
@@ -949,7 +1010,8 @@ def _review_unmatched(
     items = sorted(items, key=lambda r: 0 if r.get("open_item") else 1)[:MAX_UNMATCHED_REVIEWED]
     total_batches = (len(items) + UNMATCHED_BATCH_SIZE - 1) // UNMATCHED_BATCH_SIZE
 
-    for batch_no in range(total_batches):
+    def _one(batch_no):
+        part: List[Dict[str, Any]] = []
         batch = items[batch_no * UNMATCHED_BATCH_SIZE: (batch_no + 1) * UNMATCHED_BATCH_SIZE]
 
         lines = [
@@ -979,7 +1041,7 @@ def _review_unmatched(
             result = _get_llm().run(system=system, user="\n".join(lines), temperature=0.1)
         except Exception as exc:
             print(f"[conflict_scan] coverage batch {batch_no} failed: {exc}")
-            continue
+            return part
 
         for disc in result.get("discrepancies") or []:
             if not isinstance(disc, dict):
@@ -1010,8 +1072,12 @@ def _review_unmatched(
             if not disc.get("location"):
                 disc["location"] = _location_label(req)
             disc.setdefault("element", req.get("element_id") or "")
-            found.append(disc)
+            part.append(disc)
+        return part
 
+    from fleet import pmap
+    for part in pmap(_one, range(total_batches), role="adjudicator"):
+        found.extend(part)
     return found
 
 
@@ -1404,7 +1470,10 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         [r for r in readable_a if id(r) not in used_a],
         [r for r in readable_b if id(r) not in used_b],
     )
-    pairs = linked + keyword_pairs
+    meaning_pairs, unmatched_a, unmatched_b = semantic_pairs(unmatched_a, unmatched_b)
+    if meaning_pairs:
+        print(f"[conflict_scan] {len(meaning_pairs)} more pair(s) matched by meaning")
+    pairs = linked + keyword_pairs + meaning_pairs
     print(
         f"[conflict_scan] Aligned {len(pairs)} candidate pair(s) ({len(linked)} via baseline links); "
         f"{len(unmatched_a)} unmatched in '{label_a}', {len(unmatched_b)} in '{label_b}'"
@@ -1493,6 +1562,14 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     discrepancies = _dedupe_and_rank(raw)
     if raw_count > len(discrepancies):
         print(f"[conflict_scan] {raw_count} raw finding(s) merged into {len(discrepancies)}")
+    # 8. Second opinion from an independent model (AI fleet "verifier" role)
+    from fleet.verify import verify_findings
+    vstats = verify_findings(discrepancies)
+    if vstats.get("disputed"):
+        warnings.append(
+            f"An independent check judged {vstats['disputed']} finding(s) not to be real conflicts. They are kept and "
+            f"marked 'second opinion: not a conflict' so you can decide."
+        )
     summary = _build_summary(discrepancies, profile_a, profile_b)
     confidence = _confidence(profile_a, profile_b)
 
@@ -1509,5 +1586,7 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             f"conflict_scan: {len(pairs)} pairs reviewed ({len(linked)} baseline-linked), "
             f"{internal_counts.get('a', 0) + internal_counts.get('b', 0)} internal pairs, "
             f"{len(clusters)} interface clusters, {len(discrepancies)} discrepancies raised"
+            + (f", {len(meaning_pairs)} pairs matched by meaning" if meaning_pairs else "")
+            + (f", second opinion on {vstats['checked']} ({vstats['disputed']} disputed)" if vstats.get("checked") else "")
         ],
     }

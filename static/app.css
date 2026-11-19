@@ -988,3 +988,8 @@ details > summary:hover { color: var(--ink); }
 .member-add select[data-member-add] { flex: 1; min-width: 0; }
 .member-add select[data-member-new-role] { width: auto; flex: none; }
 .list select { min-width: 120px; }
+.badge.disputed { background: var(--warn-soft); color: var(--warn); border: 1px dashed var(--warn); }
+.badge.checked  { background: var(--ok-soft); color: var(--ok); }
+.second-opinion { font-size: 13px; padding: 8px 10px; border-radius: 8px; background: var(--ok-soft); }
+.second-opinion.disputed { background: var(--warn-soft); }
+table.list.compact td, table.list.compact th { padding: 6px 10px; }

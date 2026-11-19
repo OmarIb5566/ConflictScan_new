@@ -36,8 +36,8 @@ from sqlalchemy.exc import IntegrityError
 
 import db
 from adapters import files as file_store
-from db import (audit_log, engine, jobs, login_attempts, presence, project_members, projects, run_files, runs,
-                user_prefs, users)
+from db import (app_settings, audit_log, engine, jobs, login_attempts, presence, project_members, projects, run_files,
+                runs, user_prefs, users)
 
 DATA_DIR = db.DATA_DIR
 RUNS_DIR = os.path.join(file_store.store().root, "runs")
@@ -777,6 +777,35 @@ def present_on(target: str, within_seconds: int = 45) -> List[Dict[str, Any]]:
 def clear_presence(user_id: str, target: str) -> None:
     with tx() as conn:
         conn.execute(delete(presence).where(and_(presence.c.user_id == user_id, presence.c.target == target)))
+
+
+# ---------------------------------------------------------------------------
+# Admin-console settings
+# ---------------------------------------------------------------------------
+
+_settings_cache: Dict[str, Any] = {}
+
+
+def get_setting(key: str, default: Any = None, max_age: float = 10.0) -> Any:
+    hit = _settings_cache.get(key)
+    if hit and time.time() - hit[0] < max_age:
+        return hit[1]
+    try:
+        with tx() as conn:
+            value = conn.execute(select(app_settings.c.value).where(app_settings.c.key == key)).scalar()
+    except Exception:  # noqa: BLE001 - e.g. before the first migration
+        value = None
+    _settings_cache[key] = (time.time(), value)
+    return default if value is None else value
+
+
+def set_setting(key: str, value: Any, user_id: str = None) -> None:
+    with tx() as conn:
+        done = conn.execute(update(app_settings).where(app_settings.c.key == key)
+                            .values(value=value, updated_at=now(), updated_by=user_id))
+        if done.rowcount == 0:
+            conn.execute(insert(app_settings).values(key=key, value=value, updated_at=now(), updated_by=user_id))
+    _settings_cache.pop(key, None)
 
 
 # ---------------------------------------------------------------------------

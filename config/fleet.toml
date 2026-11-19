@@ -1,0 +1,102 @@
+# AI fleet - which local model does which job.
+#
+# A profile maps every ROLE in the pipeline to a model, with fallbacks (used
+# when the model is not installed or keeps failing), how many requests may run
+# at once, and per-role options. Choose the profile with fleet.profile in
+# conflictscan.toml or CONFLICTSCAN_FLEET_PROFILE. Admins can see the active
+# assignments in the admin console (System health -> AI fleet).
+#
+# Roles
+#   page_triage     is a scanned page a drawing or a document?        (vision)
+#   ocr             transcribe scanned pages                           (vision)
+#   drawing_overview  title block, structural system, grids per sheet  (vision)
+#   drawing_reader  read values off each drawing tile                  (vision)
+#   drawing_second  independent second reading of tiles with values    (vision, optional)
+#   extractor       requirements/quantities from document text; baselines; sheet labels
+#   adjudicator     decide whether candidate pairs really conflict
+#   verifier        independent second opinion on every finding        (optional)
+#   drafter         write the RFIs
+#   embedder        meaning-based matching and the RFI memory          (embedding model)
+#
+# Modes
+#   staged    one GPU (the 24 GB workstation): work is ordered so one model
+#             runs at a time; models are unloaded when another is needed.
+#   resident  several GPUs / large memory (A100 host): every model stays
+#             loaded (keep_alive = -1) and roles run side by side.
+#
+# Only local models are accepted; "...:cloud" models are refused.
+
+default_profile = "workstation"
+
+# ---------------------------------------------------------------------------
+# baseline: the single-model pipeline before the fleet (used by the benchmark)
+# ---------------------------------------------------------------------------
+[profiles.baseline]
+mode = "staged"
+parallel = 1
+verify_findings = false
+semantic_matching = false
+rfi_memory = false
+second_reader = false
+vote_critical = false
+
+[profiles.baseline.roles]
+page_triage      = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
+ocr              = { model = "qwen2.5vl:7b", fallback = ["glm-ocr:latest", "gemma4:e4b"] }
+drawing_overview = { model = "gemma4:e4b" }
+drawing_reader   = { model = "gemma4:e4b" }
+extractor        = { model = "gemma4:e4b" }
+adjudicator      = { model = "gemma4:e4b" }
+drafter          = { model = "gemma4:e4b" }
+embedder         = { model = "bge-m3:latest" }
+
+# ---------------------------------------------------------------------------
+# workstation: the fleet on one RTX 4090 (24 GB) - staged
+# ---------------------------------------------------------------------------
+[profiles.workstation]
+mode = "staged"
+parallel = 2                 # requests in flight per role (set OLLAMA_NUM_PARALLEL >= this)
+verify_findings = true
+semantic_matching = true
+rfi_memory = true
+second_reader = false        # doubles drawing time on one GPU; on in the a100 profile
+vote_critical = false
+
+[profiles.workstation.roles]
+page_triage      = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
+ocr              = { model = "qwen2.5vl:7b", fallback = ["glm-ocr:latest"], parallel = 2 }
+drawing_overview = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
+drawing_reader   = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
+drawing_second   = { model = "gemma4:e4b" }
+extractor        = { model = "qwen3:14b", fallback = ["gemma4:e4b"], think = false }
+adjudicator      = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false, parallel = 1 }
+verifier         = { model = "gpt-oss:latest", fallback = ["qwen3:14b"], parallel = 1 }
+drafter          = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false, parallel = 1 }
+embedder         = { model = "bge-m3:latest", parallel = 4 }
+
+# ---------------------------------------------------------------------------
+# a100: the fleet on the A100 host - every model resident, roles side by side
+# ---------------------------------------------------------------------------
+[profiles.a100]
+mode = "resident"
+parallel = 4
+verify_findings = true
+semantic_matching = true
+rfi_memory = true
+second_reader = true
+vote_critical = true         # 3-way vote on critical findings
+
+[profiles.a100.roles]
+page_triage      = { model = "qwen2.5vl:7b" }
+ocr              = { model = "qwen2.5vl:7b", fallback = ["glm-ocr:latest"], parallel = 6 }
+drawing_overview = { model = "qwen2.5vl:7b" }
+drawing_reader   = { model = "qwen2.5vl:7b", parallel = 6 }
+drawing_second   = { model = "gemma4:e4b", parallel = 6 }
+extractor        = { model = "qwen3:14b", think = false, parallel = 6 }
+adjudicator      = { model = "qwen3.6:27b", think = false, parallel = 4 }
+verifier         = { model = "gpt-oss:latest", parallel = 4 }
+drafter          = { model = "qwen3.6:27b", think = false, parallel = 4 }
+embedder         = { model = "bge-m3:latest", parallel = 8 }
+# Larger local models to try on the A100s (pull them, then benchmark: python -m bench.run --profile a100):
+# drawing_reader = { model = "qwen2.5vl:32b" }      # or qwen2.5vl:72b on 80 GB cards
+# adjudicator    = { model = "qwen3:32b" }

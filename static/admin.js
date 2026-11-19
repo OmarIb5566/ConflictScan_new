@@ -8,7 +8,14 @@
 (() => {
 const { $, $$, esc, el, api, toast, toastError, modal, confirmDialog, timeEl, fmtDate, avatar, ROLE_LABEL, isAdmin, WS, App } = window.CS;
 
-const SECTIONS = [["users", "Users"], ["queue", "Scan queue"], ["health", "System health"], ["audit", "Audit log"], ["settings", "Settings"]];
+const SECTIONS = [["users", "Users"], ["queue", "Scan queue"], ["fleet", "AI fleet"], ["health", "System health"], ["audit", "Audit log"], ["settings", "Settings"]];
+const ROLE_HELP = {
+  page_triage: "Is a scanned page a drawing or a document?", ocr: "Reads scanned pages",
+  drawing_overview: "Title block, system and grids of each sheet", drawing_reader: "Reads values off each drawing tile",
+  drawing_second: "Independent second reading of drawing values", extractor: "Pulls requirements and quantities out of documents",
+  adjudicator: "Decides which candidate pairs really conflict", verifier: "Second opinion on every finding",
+  drafter: "Writes the RFIs", embedder: "Meaning-based matching and the RFI memory",
+};
 const STATUS_LABEL = { active: "Active", pending: "Waiting for approval", disabled: "Disabled" };
 
 class AdminView {
@@ -131,6 +138,34 @@ class AdminView {
       <div class="table-wrap"><table class="list">${head}<tbody>${recent.map(row).join("") || `<tr><td colspan="8" class="muted">Nothing yet.</td></tr>`}</tbody></table></div>`;
   }
 
+  // ---- AI fleet ---------------------------------------------------------
+  async html_fleet() {
+    const f = await api("/api/admin/fleet");
+    this.fleet = f;
+    const installed = [...new Set(f.servers.flatMap((s) => s.models || []))].sort();
+    const usage = Object.fromEntries(f.usage_24h.map((u) => [u.role, u]));
+    const feat = { verify_findings: "Second opinion on findings", semantic_matching: "Meaning-based matching",
+      rfi_memory: "Company RFI memory", second_reader: "Second reading of drawing values", vote_critical: "3-way vote on critical findings" };
+    return `<div class="card"><div class="row wrap" style="gap:14px">
+        <label class="field" style="margin:0"><span>Active profile</span>
+          <select data-fleet-profile>${f.profiles.map((p) => `<option value="${esc(p)}" ${p === f.profile ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
+        <div class="grow hint">Mode: <strong>${esc(f.mode)}</strong> ${f.mode === "resident" ? "- every model stays loaded, roles run side by side"
+          : "- one GPU: models take turns, work is ordered by model"}.<br>
+          ${Object.entries(f.features).map(([k, on]) => `<span class="badge ${on ? "user-active" : "outline"}">${on ? "&#10003;" : "&ndash;"} ${esc(feat[k] || k)}</span>`).join(" ")}</div>
+        <div class="hint">RFI memory: <strong>${Object.values(f.rfi_memory || {}).reduce((a, b) => a + b, 0)}</strong> past RFIs</div></div>
+        <p class="hint" style="margin-top:10px">Changes apply to the next scan. Only models installed on the company's own model servers can be chosen; cloud models are refused.</p></div>
+      <datalist id="installed-models">${installed.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+      <div class="table-wrap"><table class="list"><thead><tr><th>Job</th><th>Configured</th><th>Running on</th><th>Override</th><th>Last 24 h</th><th></th></tr></thead>
+      <tbody>${f.roles.map((r) => { const u = usage[r.role]; return `<tr>
+        <td><strong>${esc(r.role.replace(/_/g, " "))}</strong><div class="desc">${esc(ROLE_HELP[r.role] || "")}</div></td>
+        <td class="mono small">${esc(r.configured)}${r.fallback.length ? `<div class="desc">then ${esc(r.fallback.join(", "))}</div>` : ""}</td>
+        <td class="mono small">${r.used ? `${esc(r.used)} <span class="muted">@${esc(r.server || "")}</span>` : '<span class="badge st-failed">not available</span>'}</td>
+        <td><input class="mono small" data-fleet-role="${esc(r.role)}" list="installed-models" placeholder="(profile default)"
+          value="${esc((f.console.roles || {})[r.role] || "")}" style="min-width:160px"></td>
+        <td class="small nowrap">${u ? `${u.calls} calls &middot; ${(u.avg_ms / 1000).toFixed(1)} s avg${u.cached ? ` &middot; ${u.cached} cached` : ""}${u.failed ? ` &middot; <span style="color:var(--danger)">${u.failed} failed</span>` : ""}` : '<span class="muted">-</span>'}</td>
+        <td><button class="btn sm" data-fleet-test="${esc(r.role)}">Test</button> <span class="small" data-fleet-result="${esc(r.role)}"></span></td></tr>`; }).join("")}</tbody></table></div>`;
+  }
+
   // ---- health -----------------------------------------------------------
   async html_health() {
     const h = await api("/api/admin/health");
@@ -206,6 +241,14 @@ class AdminView {
       catch (err) { toastError(err); }
       return;
     }
+    const test = t.closest("[data-fleet-test]");
+    if (test) {
+      const out = $(`[data-fleet-result="${test.dataset.fleetTest}"]`, this.el);
+      out.innerHTML = '<span class="spinner sm"></span>';
+      const r = await api("/api/admin/fleet/test", { method: "POST", body: { role: test.dataset.fleetTest } }).catch((err) => ({ ok: false, error: err.message }));
+      out.innerHTML = r.ok ? `<span style="color:var(--ok)">&#10003; ${(r.ms / 1000).toFixed(1)} s</span>` : `<span style="color:var(--danger)" title="${esc(r.error || "")}">failed</span>`;
+      return;
+    }
     const job = t.closest("[data-job]");
     if (job) {
       if (job.dataset.jobAct === "cancel" && !(await confirmDialog("Cancel this job? A running scan stops after its current stage.", { title: "Cancel job", confirmLabel: "Cancel job", danger: true }))) return;
@@ -232,6 +275,15 @@ document.addEventListener("change", async (e) => {
     try { await api(`/api/admin/users/${role.dataset.userRole}`, { method: "PATCH", body: { role: role.value } }); toast("Role updated", { type: "success", timeout: 1500 }); }
     catch (err) { toastError(err); view.renderBody(true); }
   }
+  if (e.target.closest("[data-fleet-profile]")) {
+    try { await api("/api/admin/fleet", { method: "PUT", body: { profile: e.target.value } }); toast(`AI profile: ${e.target.value}`, { type: "success" }); view.renderBody(true); }
+    catch (err) { toastError(err); }
+  }
+  const roleInput = e.target.closest("[data-fleet-role]");
+  if (roleInput) {
+    try { await api("/api/admin/fleet", { method: "PUT", body: { roles: { [roleInput.dataset.fleetRole]: roleInput.value.trim() } } }); toast("Model assignment saved", { type: "success", timeout: 1500 }); view.renderBody(true); }
+    catch (err) { toastError(err); view.renderBody(true); }
+  }
   if (e.target.closest("[data-audit-action]")) { view.auditFilter.action = e.target.value; view.renderBody(true); }
   if (e.target.closest("[data-audit-user]")) { view.auditFilter.user = e.target.value; view.renderBody(true); }
 });
@@ -242,6 +294,7 @@ window.CS.PALETTE_ITEMS.push(() => isAdmin() ? [
   { label: "Admin: users", run: () => WS.open("admin", "main", { step: "users" }) },
   { label: "Admin: scan queue", run: () => WS.open("admin", "main", { step: "queue" }) },
   { label: "Admin: system health", run: () => WS.open("admin", "main", { step: "health" }) },
+  { label: "Admin: AI fleet (models)", run: () => WS.open("admin", "main", { step: "fleet" }) },
   { label: "Admin: audit log", run: () => WS.open("admin", "main", { step: "audit" }) },
 ] : []);
 })();

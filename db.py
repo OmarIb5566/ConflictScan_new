@@ -272,8 +272,68 @@ presence = Table(
     PrimaryKeyConstraint("user_id", "target"),
 )
 
+# --- AI fleet (migration 0002) ------------------------------------------------
+
+ai_cache = Table(
+    "ai_cache", metadata,
+    Column("key", String(64), primary_key=True),            # sha256 of model + prompt + images + options
+    Column("role", String(30), nullable=False),
+    Column("model", Unicode(120), nullable=False),
+    Column("value", UnicodeText, nullable=False),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("last_used_at", UTCDateTime, nullable=False),
+    Column("hits", Integer, nullable=False, default=0),
+    Index("ix_ai_cache_used", "last_used_at"),
+)
+
+model_calls = Table(
+    "model_calls", metadata,
+    ID(name="id", primary_key=True),
+    Column("at", UTCDateTime, nullable=False),
+    Column("run_id", String(32)),
+    Column("role", String(30), nullable=False),
+    Column("model", Unicode(120), nullable=False),
+    Column("server", Unicode(200)),
+    Column("ms", Integer, nullable=False, default=0),
+    Column("prompt_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("images", Integer, nullable=False, default=0),
+    Column("cached", Boolean, nullable=False, default=False),
+    Column("ok", Boolean, nullable=False, default=True),
+    Column("error", Unicode(300)),
+    Index("ix_model_calls_run", "run_id"),
+    Index("ix_model_calls_at", "at"),
+)
+
+rfi_memory = Table(
+    "rfi_memory", metadata,
+    ID(name="id", primary_key=True),
+    Column("source", String(20), nullable=False),          # training | issued | imported
+    Column("project_name", Unicode(200), nullable=False),
+    Column("rfi_no", Unicode(120), nullable=False),
+    Column("subject", Unicode(500), nullable=False, default=""),
+    Column("text", UnicodeText, nullable=False, default=""),
+    Column("discipline", Unicode(60)),
+    Column("issue_class", String(60)),
+    Column("response", UnicodeText),
+    Column("embedding", JSONText),
+    Column("embed_model", Unicode(120)),
+    Column("created_at", UTCDateTime, nullable=False),
+    UniqueConstraint("source", "project_name", "rfi_no", name="uq_rfi_memory_item"),
+)
+
+# --- Settings an administrator changes in the console (migration 0003) ----------
+
+app_settings = Table(
+    "app_settings", metadata,
+    Column("key", String(64), primary_key=True),
+    Column("value", JSONText),
+    Column("updated_at", UTCDateTime, nullable=False),
+    Column("updated_by", String(32)),
+)
+
 ALL_TABLES = [users, user_prefs, projects, project_members, runs, run_files, jobs, audit_log,
-              login_attempts, presence]
+              login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings]
 
 
 # ---------------------------------------------------------------------------

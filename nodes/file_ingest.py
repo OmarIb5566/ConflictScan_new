@@ -70,7 +70,8 @@ def _vision_page_kind(page) -> Optional[str]:
     import tempfile
     import pymupdf
     try:
-        from nodes.vision_client import vision_llm_client
+        from fleet import llm
+        vision_llm_client = llm("page_triage")
         zoom = 1000 / max(page.rect.width, page.rect.height, 1.0)
         fd, tmp = tempfile.mkstemp(suffix=".png")
         os.close(fd)
@@ -78,7 +79,7 @@ def _vision_page_kind(page) -> Optional[str]:
             page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(tmp)
             result = vision_llm_client.run(system=_PAGE_KIND_SYSTEM, user="What is this page?",
                                            images=[tmp], temperature=0.0, max_retries=1,
-                                           model=vision_llm_client.page_kind_model())
+                                           )
         finally:
             os.unlink(tmp)
         kind = str(result.get("kind") or "").strip().lower()
@@ -164,7 +165,8 @@ def _label_excel_sheets(sheets_info: list) -> dict:
     if not sheets_info:
         return {}
     try:
-        from nodes.llm_client import llm_client
+        from fleet import llm
+        llm_client = llm("extractor")
 
         summary = [
             {"sheet_name": s["name"], "column_headers": s["columns"][:25], "sample_data": s["sample_csv"][:600]}
@@ -297,6 +299,7 @@ def _read_pdf(path: str, ocr: bool, progress: Optional[Callable[[str], None]], r
     pages_text: List[str] = []
     ocr_pages: List[int] = []
     skipped_ocr: List[int] = []
+    to_ocr: List[tuple] = []
     with pymupdf.open(path) as doc:
         for i, page in enumerate(doc, start=1):
             text = decode_symbol_font(page.get_text() or "").strip()
@@ -304,30 +307,56 @@ def _read_pdf(path: str, ocr: bool, progress: Optional[Callable[[str], None]], r
                 if len(ocr_pages) >= MAX_OCR_PAGES_PER_FILE:
                     skipped_ocr.append(i)
                 else:
-                    if progress:
-                        progress(f"OCR page {i}/{len(doc)} of {os.path.basename(path)}")
-                    text = _ocr_page(page, i, render_dir) or text
+                    to_ocr.append((i, _render_for_ocr(page, i, render_dir), len(pages_text)))
                     ocr_pages.append(i)
-            pages_text.append(f"[Page {i}]\n{text}")
+            pages_text.append(text)
+        total = len(doc)
+    if to_ocr:
+        from fleet import pmap
+
+        def _one(job):
+            i, img, _slot = job
+            if progress:
+                progress(f"OCR page {i}/{total} of {os.path.basename(path)}")
+            try:
+                return _transcribe(img)
+            finally:
+                try:
+                    os.unlink(img)
+                except OSError:
+                    pass
+
+        for (i, _img, slot), text in zip(to_ocr, pmap(_one, to_ocr, role="ocr")):
+            pages_text[slot] = text or pages_text[slot]
+    pages_text = [f"[Page {n}]\n{t}" for n, t in enumerate(pages_text, start=1)]
     return {"text": "\n\n".join(pages_text), "pages": len(pages_text), "ocr_pages": ocr_pages, "skipped_ocr": skipped_ocr}
 
 
 def _ocr_page(page, page_no: int, render_dir: str) -> str:
-    from nodes.vision_client import vision_llm_client
-
-    os.makedirs(render_dir, exist_ok=True)
-    long_pt = max(page.rect.width, page.rect.height, 1.0)
-    zoom = OCR_RENDER_LONG_PX / long_pt
-    import pymupdf
-    img_path = os.path.join(render_dir, f"ocr_p{page_no}.png")
-    page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(img_path)
+    """Render one page and transcribe it (OCR role); used for one-off pages."""
+    img_path = _render_for_ocr(page, page_no, render_dir)
     try:
-        return vision_llm_client.transcribe(img_path)
+        return _transcribe(img_path)
     finally:
         try:
             os.unlink(img_path)
         except OSError:
             pass
+
+
+def _render_for_ocr(page, page_no: int, render_dir: str) -> str:
+    import pymupdf
+    os.makedirs(render_dir, exist_ok=True)
+    long_pt = max(page.rect.width, page.rect.height, 1.0)
+    zoom = OCR_RENDER_LONG_PX / long_pt
+    img_path = os.path.join(render_dir, f"ocr_p{page_no}.png")
+    page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(img_path)
+    return img_path
+
+
+def _transcribe(img_path: str) -> str:
+    from fleet import llm
+    return llm("ocr").transcribe(img_path)
 
 
 def read_document(path: str, ocr: bool = True, progress: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:

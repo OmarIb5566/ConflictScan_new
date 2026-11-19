@@ -48,20 +48,16 @@ _vision_client_instance = None
 _llm_client_instance = None
 
 
-def _get_vision_llm():
-    global _vision_client_instance
-    if _vision_client_instance is None:
-        from nodes.vision_client import vision_llm_client
-        _vision_client_instance = vision_llm_client
-    return _vision_client_instance
+def _get_vision_llm(role: str = "drawing_reader"):
+    """The AI fleet's vision role for drawings (config/fleet.toml)."""
+    from fleet import llm
+    return llm(role)
 
 
 def _get_llm():
-    global _llm_client_instance
-    if _llm_client_instance is None:
-        from nodes.llm_client import llm_client
-        _llm_client_instance = llm_client
-    return _llm_client_instance
+    """The AI fleet's extractor role (baseline requirement sets from documents)."""
+    from fleet import llm
+    return llm("extractor")
 
 
 # ---------------------------------------------------------------------------
@@ -1141,7 +1137,7 @@ def _extract_sheet_overview(sheet: Dict[str, Any], doc_label: str, dxf_context: 
     )
     try:
         result = _run_json(
-            _get_vision_llm(), system=_OVERVIEW_SYSTEM, user=user, images=[sheet["render_path"]], temperature=0.1,
+            _get_vision_llm("drawing_overview"), system=_OVERVIEW_SYSTEM, user=user, images=[sheet["render_path"]], temperature=0.1,
         )
     except Exception as exc:
         print(f"[drawing_analysis] {doc_label} sheet '{sheet['name']}' overview call failed: {exc}")
@@ -1486,6 +1482,43 @@ def _value_tokens(value: str) -> List[str]:
     return numeric or [t for t in tokens if len(t) >= 3]
 
 
+def _second_reading(requirements: List[Dict[str, Any]], prompt: str, tile: Dict[str, Any], strings: List[str]) -> int:
+    """
+    AI fleet second reader (drawing_second role, optional): an independent
+    vision model reads the same tile. A value the sheet's text could not
+    confirm is kept only as 'verify' unless the second reader saw it too.
+    Returns how many values were newly flagged.
+    """
+    from fleet import profile
+    pending = [r for r in requirements if r.get("value") and not r.get("value_unverified") and len(strings) < 3]
+    pending += [r for r in requirements if r.get("value_unverified")]
+    if not pending or not profile.feature("second_reader") or not profile.role("drawing_second"):
+        return 0
+    try:
+        second = _run_json(_get_vision_llm("drawing_second"), system=_TILE_SYSTEM, user=prompt, images=[tile["path"]],
+                           temperature=0.1)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[drawing_analysis] second reading failed: {exc}")
+        return 0
+    seen = re.sub(r"\s+", "", " ".join(str(r.get("value") or "") for r in (second.get("requirements") or [])
+                                       if isinstance(r, dict)).upper())
+    flagged = 0
+    for req in pending:
+        tokens = _value_tokens(req["value"])
+        agree = bool(tokens) and sum(1 for t in tokens if t in seen) / len(tokens) >= 0.5
+        req["second_reading"] = "agrees" if agree else "differs"
+        if agree and req.get("value_unverified"):
+            # Two independent readers saw the same value: still 'verify', but say so.
+            req["statement"] = req["statement"].replace("(value not found in the sheet's text - verify)",
+                                                        "(value read by two models but not in the sheet's text - verify)")
+        if not agree and not req.get("low_confidence"):
+            req["legibility"] = "partial"
+            req["low_confidence"] = True
+            req["statement"] = f"{req['statement']} (a second reading of the sheet saw a different value - verify)"
+            flagged += 1
+    return flagged
+
+
 def _verify_values(requirements: List[Dict[str, Any]], strings: List[str]) -> int:
     """
     Hallucination guard. When the tile's real text is known (text layer or
@@ -1608,7 +1641,7 @@ def _tile_strings(sheet: Dict[str, Any], tile: Dict[str, Any]) -> Tuple[List[str
     if not DRAWING_OCR:
         return [], "none"
     try:
-        text = _get_vision_llm().transcribe(tile["path"])
+        text = _get_vision_llm("ocr").transcribe(tile["path"])
     except Exception as exc:
         print(f"[drawing_analysis] tile OCR failed: {exc}")
         return [], "none"
@@ -1820,13 +1853,17 @@ def build_drawing_profile(
             "overview": overview,
         })
 
+        work = []
         for i, tile in enumerate(tiles, start=1):
             if len(tiles) > 1 and _ink_fraction(tile["path"]) < BLANK_TILE_INK:
                 blank_tiles += 1
                 continue
-            total_tiles += 1
+            work.append((i, tile))
+        total_tiles += len(work)
+
+        def _read_tile(job, sheet=sheet, sheet_ref=sheet_ref, overview=overview, tiles=tiles):
+            i, tile = job
             strings, text_source = _tile_strings(sheet, tile)
-            ocr_tiles += text_source == "ocr"
             prompt = _tile_prompt(
                 sheet_ref, overview, tile, i, len(tiles), strings, checklist_text,
                 review_focus, dxf_quantities=bool(dxf), text_source=text_source,
@@ -1834,12 +1871,18 @@ def build_drawing_profile(
             print(f"[drawing_analysis]   -> '{label}' sheet {sheet_ref} tile {i}/{len(tiles)} ({tile['region']}, "
                   f"{len(strings)} {text_source} string(s))")
             result = _extract_tile(prompt, tile, sheet_ref, label, checked_ids, overview, checklist, strings)
-            unverified_values += result.pop("unverified_values", 0)
-            results.append(result)
+            result["second_reading_flags"] = _second_reading(result.get("requirements") or [], prompt, tile, strings)
             print(
                 f"[drawing_analysis]      {len(result['requirements'])} item(s), "
                 f"{len(result['quantities'])} quantity item(s)"
             )
+            return i, tile, strings, text_source, result
+
+        from fleet import pmap
+        for i, tile, strings, text_source, result in pmap(_read_tile, work, role="drawing_reader"):
+            ocr_tiles += text_source == "ocr"
+            unverified_values += result.pop("unverified_values", 0) + result.pop("second_reading_flags", 0)
+            results.append(result)
             debug_tiles.append({
                 "sheet": sheet_ref, "tile": i, "total_tiles": len(tiles), "region": tile["region"],
                 "box": tile["box"], "tile_image_path": str(tile["path"]), "text_source": text_source,

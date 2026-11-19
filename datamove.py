@@ -157,11 +157,14 @@ def verify_against(path: str) -> List[str]:
     manifest = read_manifest(path)
     got = snapshot()
     # Audit entries written after the export (e.g. by the restore itself) are not differences.
+    with zipfile.ZipFile(path) as zf:
+        exported_ids = {json.loads(line)["id"] for line in zf.read("tables/audit_log.jsonl").decode("utf-8").splitlines()
+                        if line}
     with db.engine.connect() as conn:
         h = hashlib.sha256()
         n = 0
         for row in _table_rows(conn, db.audit_log):
-            if row["at"] <= manifest["created_at"]:
+            if row["id"] in exported_ids:
                 h.update(_canonical(row).encode("utf-8"))
                 h.update(b"\n")
                 n += 1

@@ -220,6 +220,75 @@ and the problem, followed by one line per source with its reference and its
 words in quotation marks, then one question per point. **Every RFI field is editable**. Edits save as you type. Click *Regenerate Word
 document* to write the revised RFI into that run's own exports folder.
 
+## AI fleet: several local models, each on the job it does best
+
+Every model call goes through `fleet/`. A **profile** in `config/fleet.toml`
+assigns a local model to each role in the pipeline:
+
+| Role | Job | Workstation / A100 model |
+|---|---|---|
+| page_triage | Is a scanned page a drawing or a document? | qwen2.5vl:7b |
+| ocr | Read scanned pages | qwen2.5vl:7b (glm-ocr as fallback) |
+| drawing_overview / drawing_reader | Title blocks and values on drawing tiles | qwen2.5vl:7b |
+| drawing_second | Independent second reading of drawing values (A100) | gemma4:e4b |
+| extractor | Requirements and quantities from documents | qwen3:14b |
+| adjudicator | Decides which candidate pairs really conflict | qwen3.6:27b |
+| verifier | Second opinion on every finding | gpt-oss |
+| drafter | Writes the RFIs | qwen3.6:27b |
+| embedder | Matching by meaning; the RFI memory | bge-m3 |
+
+The three profiles:
+
+- **baseline** is the pipeline as it was before the fleet, with one model.
+  The benchmark compares against it.
+- **workstation** runs the fleet on one 24 GB GPU in staged mode: models take
+  turns.
+- **a100** runs in resident mode: every model stays loaded and roles run side
+  by side. It also adds the second drawing reader and a 3-way vote on
+  critical findings.
+
+Admins switch profile or re-assign a role in **Admin console → AI fleet**,
+with a *Test* button per role. Changes apply to the next scan; cloud models
+are refused.
+
+What the fleet adds:
+
+- **Parallel work.** Document chunks, drawing tiles, OCR pages, comparison
+  batches and RFI drafts run concurrently, up to each role's `parallel` limit.
+- **Response cache.** Answers are cached by the exact request (model, prompt
+  and image bytes), so re-scanning unchanged files costs nothing.
+- **Second opinions.** The verifier re-reads every finding against the quoted
+  sources. Findings it rejects are kept, marked *second opinion: not a
+  conflict* with its reason, and can be filtered.
+- **Matching by meaning.** A second alignment pass pairs statements the
+  keyword pass missed: different wording, English and Arabic.
+- **RFI memory.** `python manage.py index-rfis "<folder>"` indexes past RFIs
+  and client replies. The drafter sees how similar past RFIs were worded:
+  style only, never facts.
+- **Call log.** Every model call is recorded (role, model, server, time,
+  tokens, cached). Each scan shows which model did what, and the usage
+  dashboard reads the same log.
+- **Faster local calls.** Calls go to `127.0.0.1` over keep-alive connections.
+  On Windows, `localhost` added about 2 s to every call.
+
+### Benchmark on real RFIs
+
+```powershell
+python -m bench.run --list --cases 10                       # cases from "RFI training data"
+python -m bench.run --cases 6 --no-cache --profile baseline --profile workstation
+python -m bench.run --compare data/bench/*                  # side-by-side table
+```
+
+Each case is one real RFI.
+
+- **Input:** its attachments are scanned as two sets.
+- **Score:** whether any finding describes the issue the engineer actually
+  raised (meaning similarity with bge-m3, or strong keyword overlap).
+- **Also reported:** findings per case (noise), disputed findings, time per
+  stage and model time per role.
+
+Results stay under `data/bench/`.
+
 ## Platform: users, roles, database, workers
 
 ConflictScan runs on the host company's own servers. It uses only local
@@ -352,6 +421,10 @@ ConflictScan_RFI_automation/
 ├── storage.py                # all database access (SQLAlchemy Core)
 ├── migrations/               # Alembic schema migrations
 ├── adapters/                 # identity (local/LDAP), files (local/share/S3), reference data, model servers
+├── fleet/                    # AI fleet: roles/profiles, client (cache, log, fallback), verify, memory, corpus
+├── fleet_api.py              # admin console: AI fleet
+├── bench/run.py              # accuracy/speed benchmark on real past RFIs
+├── config/fleet.toml         # role -> model profiles (baseline / workstation / a100)
 ├── jobs.py                   # database job queue, workers, live progress, retries, upload checks
 ├── worker.py, serve.py       # scan worker process; production web server (waitress)
 ├── manage.py, datamove.py    # admin commands: init, sql, export/import, backup/restore, verify

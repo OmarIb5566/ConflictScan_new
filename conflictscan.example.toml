@@ -88,5 +88,7 @@ url = "http://localhost:11434"
 # roles = ["adjudicator", "drafter"]
 
 [fleet]
-mode = "staged"               # staged (one GPU, models take turns) | resident (A100: all loaded at once)
-# file = "config/fleet.toml"  # role -> model assignments (see config/fleet.toml)
+profile = "workstation"       # workstation (one GPU) | a100 (all models resident) | baseline (single model)
+# mode = "resident"           # override the profile's mode: staged | resident
+# file = "config/fleet.toml"  # role -> model profiles (see that file)
+# roles = { adjudicator = { model = "qwen3:32b" } }   # override single roles
