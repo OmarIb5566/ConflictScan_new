@@ -1010,3 +1010,14 @@ table.list.compact td, table.list.compact th { padding: 6px 10px; }
 .cmp-list li { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .prev-text { margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; }
 .prev-val { white-space: pre-wrap; font-size: 13px; color: var(--ink-soft); margin-bottom: 8px; }
+
+/* ------------------------------------------------------------ RFI log */
+.stat-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.stat-chip { display: flex; flex-direction: column; align-items: flex-start; min-width: 104px; padding: 8px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface); cursor: pointer; font: 500 12px 'Inter', 'Segoe UI', system-ui, sans-serif; color: var(--ink-soft); }
+.stat-chip .n { font: 700 20px 'Inter', 'Segoe UI', system-ui, sans-serif; color: var(--ink); }
+.stat-chip.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.stat-chip.danger .n { color: var(--danger); }
+tr.overdue td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.response-box { margin-top: 14px; background: var(--surface-2, var(--surface)); }
+.rfi-li .logno { font-size: 11px; color: var(--accent); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

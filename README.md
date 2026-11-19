@@ -247,6 +247,29 @@ document* to write the revised RFI into that run's own exports folder.
   - The project's own RFI form (.docx), with a preview of every `{{token}}`
     and a filled sample to download.
 
+## The project RFI log
+
+Every RFI that leaves the company goes through the project's **RFI log**
+(*RFI log* button on the project page):
+
+    draft → in review → approved → issued → response received → closed   (void at any point)
+
+- **Getting into the log.** *Add to RFI log* on a scan's RFI gives it the
+  project's next house number, e.g. `TRC02-RFI-RME-ELEC-0139`. The number is
+  printed on its Word form and PDF and carries over to later revisions.
+- **Who does what.** Engineers draft, submit for review and record
+  responses. Project managers approve, issue, close and void.
+- **Due dates.** Issuing sets the due date from the project's response time
+  in working days (Friday and Saturday off). Overdue RFIs are flagged.
+- **Client responses.** A response is recorded with its text and files and
+  joins the company RFI memory. *Start a new revision with the response
+  files* re-scans the documents with the answer included.
+- **Exports.** Each RFI downloads as PDF (no office software needed) or as the
+  filled Word form. The whole log exports to Excel; the findings register
+  already does.
+- **Existing logs.** *Import existing log* reads a project's current Excel
+  log, so numbering continues after it and its RFIs become searchable.
+
 ## AI fleet: several local models, each on the job it does best
 
 Every model call goes through `fleet/`. A **profile** in `config/fleet.toml`
@@ -452,6 +475,7 @@ ConflictScan_RFI_automation/
 ├── fleet_api.py              # admin console: AI fleet
 ├── revisions.py              # carry-forward, revision comparison, file supersession/history
 ├── project_settings.py       # project settings, house numbering, the project's RFI form
+├── rfi_log.py                # project RFI log: lifecycle, responses, PDF/Word/Excel, import
 ├── bench/run.py              # accuracy/speed benchmark on real past RFIs
 ├── config/fleet.toml         # role -> model profiles (baseline / workstation / a100)
 ├── jobs.py                   # database job queue, workers, live progress, retries, upload checks
@@ -491,6 +515,7 @@ ConflictScan_RFI_automation/
 ├── static/app.js, app.css    # Web interface (no build step)
 ├── static/admin.js           # admin console
 ├── static/project_extras.js  # project settings dialog, document history
+├── static/rfilog.js          # RFI log view
 ├── config/reference_data.json  # local stand-in for the company project register
 ├── templates_rfi/            # The .docx RFI form(s) - drop the client's form here
 └── data/                     # conflictscan.db, runs/<run>/inputs|exports|debug, scratch/ (git-ignored)

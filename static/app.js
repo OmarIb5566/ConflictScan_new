@@ -2605,6 +2605,7 @@ class RunView {
           ${r.docx_stale && r.docx_file ? `<span class="edited" title="Word document is older than the text">&#8635;</span>` : ""}
         </div>
         <div class="s">${esc(r.subject) || '<span class="muted">No subject</span>'}</div>
+        ${r.log_no ? `<div class="logno mono" title="Number in the project's RFI log">&#128203; ${esc(r.log_no)}</div>` : ""}
       </div>`).join("") || `<div class="empty small">No RFIs match.</div>`;
   }
 
@@ -2650,7 +2651,8 @@ class RunView {
       ${ids.length ? `<div class="linked"><span class="muted">From findings:</span>${ids.map((id) => `<button class="badge outline" data-goto-finding="${esc(id)}">${esc(id)}</button>`).join("")}
         ${rfi.low_confidence ? `<span class="badge verify">verify OCR / partly legible values</span>` : ""}</div>` : ""}
       <div class="meta-row">
-        <label class="field"><span>Status</span><select data-rf="status">${RFI_STATUS.map(([v, l]) => `<option value="${v}" ${(rfi.status || "draft") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        ${rfi.log_id ? `<label class="field"><span>Status</span><button class="btn block" data-act="open-log" title="Approval, issue and response are tracked in the RFI log">In the RFI log &rarr;</button></label>`
+          : `<label class="field"><span>Status</span><select data-rf="status">${RFI_STATUS.map(([v, l]) => `<option value="${v}" ${(rfi.status || "draft") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`}
         <label class="field"><span>Discipline</span><select data-rf="discipline">${discOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === disc ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         <label class="field"><span>Priority</span><select data-rf="priority">${["high", "medium", "low"].map((p) => `<option value="${p}" ${rfi.priority === p ? "selected" : ""}>${p[0].toUpperCase() + p.slice(1)}</option>`).join("")}</select></label>
         <label class="field"><span>Response required by</span><input data-rf="response_required_by" value="${esc(rfi.response_required_by)}"></label>
@@ -2694,6 +2696,9 @@ class RunView {
         ${tpl ? `<button class="btn ${!rfi.docx_file || rfi.docx_stale ? "primary" : ""}" data-act="docx">${rfi.docx_file ? "Regenerate" : "Generate"} Word document</button>` : ""}
         ${rfi.docx_file ? dl(rfi.docx_file, "Download .docx") : ""}
         ${rfi.original_docx_file ? dl(rfi.original_docx_file, "AI draft .docx") : ""}
+        <a class="btn" href="/api/runs/${esc(this.id)}/rfis/${encodeURIComponent(rfi.rfi_no)}/pdf">PDF</a>
+        ${rfi.log_id ? `<button class="btn" data-act="open-log" title="Open this RFI in the project's RFI log">&#128203; ${esc(rfi.log_no || "In the RFI log")}</button>`
+          : this.readOnly() ? "" : `<button class="btn" data-act="register-rfi" title="Give it the project's next RFI number and track it to closure">Add to RFI log</button>`}
         <span class="grow"></span>
         ${rfi.original ? `<button class="btn ghost" data-act="revert-rfi" title="Discard your edits and restore the AI-drafted text">Revert to AI draft</button>` : ""}
         <button class="btn danger" data-act="delete-rfi">Delete</button>
@@ -2752,6 +2757,18 @@ class RunView {
         this.renderRfiList();
         toast(`${rfi.rfi_no} Word document ready`, { type: "success", action: "Download", onAction: () => { location.href = `/api/runs/${this.id}/exports/${encodeURIComponent(r.docx_file)}`; } });
       }
+      if (act === "register-rfi") {
+        await this.rfiSaver(rfi.rfi_no).flush();
+        const submit = await confirmDialog(`Add ${rfi.rfi_no} to the project's RFI log? It gets the next RFI number. Submit it for a manager's review now, or keep it as a draft?`,
+          { title: "Add to RFI log", confirmLabel: "Submit for review" });
+        const entry = await api(`/api/runs/${this.id}/rfis/${encodeURIComponent(rfi.rfi_no)}/register`, { method: "POST", body: { submit } });
+        Object.assign(rfi, { log_id: entry.id, log_no: entry.log_no, docx_stale: true });
+        this.renderRfiActions();
+        this.renderRfiList();
+        toast(`${rfi.rfi_no} is ${entry.log_no} in the RFI log (${entry.status_label})`, { type: "success", action: "Open log",
+          onAction: () => window.CS.openRfiLogEntry(this.run.project_id, entry.id) });
+      }
+      if (act === "open-log") window.CS.openRfiLogEntry(this.run.project_id, rfi.log_id);
       if (act === "revert-rfi") {
         if (!(await confirmDialog(`Discard your edits to ${rfi.rfi_no} and restore the AI-drafted text?`, { title: "Revert RFI", confirmLabel: "Revert" }))) return;
         await this.rfiSaver(rfi.rfi_no).flush();
@@ -2866,7 +2883,7 @@ class RunView {
         break;
       }
       default:
-        if (["add-rfi", "docx-all", "docx", "revert-rfi", "delete-rfi"].includes(a)) this.rfiAction(a);
+        if (["add-rfi", "docx-all", "docx", "revert-rfi", "delete-rfi", "register-rfi", "open-log"].includes(a)) this.rfiAction(a);
     }
   }
 

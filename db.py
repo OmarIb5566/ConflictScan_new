@@ -336,8 +336,56 @@ app_settings = Table(
     Column("updated_by", String(32)),
 )
 
+# --- Project RFI log (migration 0005) -------------------------------------------
+
+rfi_log = Table(
+    "rfi_log", metadata,
+    ID(name="id", primary_key=True),
+    Column("project_id", String(32), fk("projects.id"), nullable=False),
+    Column("seq", Integer, nullable=False),
+    Column("log_no", Unicode(120), nullable=False),         # house number, e.g. TRC02-RFI-RME-ELEC-0139
+    Column("run_id", String(32)),                           # revision it was drafted in (none if imported/manual)
+    Column("run_rfi_no", Unicode(40)),
+    Column("subject", Unicode(500), nullable=False, default=""),
+    Column("discipline", Unicode(60)),
+    Column("priority", String(20)),
+    Column("status", String(20), nullable=False, default="draft"),
+    Column("content", JSONText),                            # the RFI text as registered / issued
+    Column("finding_ids", JSONText),
+    Column("source", String(20), nullable=False, default="scan"),    # scan | manual | imported
+    Column("due_date", Unicode(10)),                        # YYYY-MM-DD
+    Column("assignee_id", String(32)),
+    Column("approved_by", String(32)),
+    Column("approved_at", UTCDateTime),
+    Column("issued_by", String(32)),
+    Column("issued_at", UTCDateTime),
+    Column("responded_at", UTCDateTime),
+    Column("response", UnicodeText),
+    Column("response_from", Unicode(200)),
+    Column("closed_at", UTCDateTime),
+    Column("created_by", String(32)),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("updated_at", UTCDateTime, nullable=False),
+    Column("deleted_at", UTCDateTime),
+    UniqueConstraint("project_id", "log_no", name="uq_rfi_log_no"),
+    Index("ix_rfi_log_project", "project_id", "seq"),
+)
+
+rfi_log_files = Table(
+    "rfi_log_files", metadata,
+    ID(name="id", primary_key=True),
+    Column("log_id", String(32), fk("rfi_log.id"), nullable=False),
+    Column("kind", String(20), nullable=False),             # response | attachment
+    Column("name", Unicode(300), nullable=False),
+    Column("path", Unicode(500), nullable=False),
+    Column("size", BigInteger, nullable=False, default=0),
+    Column("uploaded_by", String(32)),
+    Column("created_at", UTCDateTime, nullable=False),
+    Index("ix_rfi_log_files_log", "log_id"),
+)
+
 ALL_TABLES = [users, user_prefs, projects, project_members, runs, run_files, jobs, audit_log,
-              login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings]
+              login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings, rfi_log, rfi_log_files]
 
 
 # ---------------------------------------------------------------------------
