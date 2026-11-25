@@ -394,6 +394,16 @@ const canRole = (role, need) => (RANK[role] || 0) >= RANK[need];
 const ROLE_LABEL = { admin: "Admin", manager: "Project manager", engineer: "Engineer", viewer: "Viewer" };
 const isAdmin = () => App.me && App.me.role === "admin";
 
+// What the user sees while a stage runs - never the server's own log lines.
+const STAGE_TEXT = {
+  validate: "Checking the uploaded files...",
+  receive_input: "Checking the uploaded files...",
+  analyze_documents: "Reading the documents and drawings...",
+  conflict_scan: "Comparing the two sets and double-checking what differs...",
+  draft_rfi: "Drafting RFIs for the confirmed issues...",
+  export: "Writing the register...",
+};
+
 const App = {
   me: null,
   prefs: {},
@@ -909,7 +919,7 @@ const Jobs = {
     const name = `${r.project ? r.project.name : "Scan"} - Rev ${r.seq}`;
     const c = r.counts || {};
     const msg = r.status === "complete"
-      ? `Scan finished: ${name} - ${plural(c.findings || 0, "finding")}, ${plural(c.rfis || 0, "RFI")}`
+      ? `Scan finished: ${name} - ${r.verdict ? r.verdict.label : `${plural(c.findings || 0, "finding")}, ${plural(c.rfis || 0, "RFI")}`}`
       : r.status === "failed" ? `Scan failed: ${name}` : `Scan cancelled: ${name}`;
     toast(msg, {
       type: r.status === "complete" ? "success" : r.status === "failed" ? "error" : "info",
@@ -1701,6 +1711,12 @@ class RunView {
   onShow() { this.syncTimers(); this.startPresence(); }
   onHide() { this.syncTimers(true); this.stopPresence(); }
   readOnly() { return this.run && this.run.my_role === "viewer"; }
+  // Cancel asked for (here, or by someone else / before a reload): the scan's log says so.
+  isStopping() {
+    if (!this.run || !ACTIVE.has(this.run.status)) { this.stopping = false; return false; }
+    const log = (this.run.progress || {}).log || [];
+    return this.stopping || log.some((l) => /Cancel requested/.test(l));
+  }
 
   // ---- presence: "Sara is viewing this" ---------------------------------------
   startPresence() {
@@ -1787,6 +1803,7 @@ class RunView {
   }
   defaultStep() {
     const s = this.run.status;
+    if (s === "complete" && (this.results().assessment || {}).verdict === "insufficient_input") return "scan";
     if (s === "complete") return "findings";
     if (s !== "draft") return "scan";
     return this.run.files.length ? "documents" : "details";
@@ -1885,7 +1902,8 @@ class RunView {
     this.renderPresence();
     const btns = [];
     const ro = this.readOnly();
-    if (ACTIVE.has(status) && !ro) btns.push(`<button class="btn danger" data-act="cancel">Cancel scan</button>`);
+    if (ACTIVE.has(status) && !ro) btns.push(this.isStopping() ? `<button class="btn danger" disabled><span class="spinner sm"></span> Stopping&hellip;</button>`
+      : `<button class="btn danger" data-act="cancel">Cancel scan</button>`);
     for (const extra of RUN_HEAD_ACTIONS) { const h = extra(this); if (h) btns.push(h); }
     if (r.results) btns.push(`<a class="btn" href="/api/runs/${esc(r.id)}/bundle" data-act="bundle" title="Register + every RFI document">Download all (.zip)</a>`);
     if (status === "complete" && !ro) btns.push(`<button class="btn primary" data-act="clone" title="Make a new revision with these files and settings">Edit &amp; re-run</button>`);
@@ -1966,7 +1984,7 @@ class RunView {
   step_documents(body) {
     body.innerHTML = `${this.lockedBanner()}<div class="slots">${["a", "b"].map((s) => this.slotHtml(s)).join("")}</div>
       <p class="hint" style="margin-top:12px">Type <em>Auto</em> decides per file: sheets larger than A4, sketches, images and DXF are read as drawings;
-      BOQs, specs and letters as documents (scanned pages are OCR-read). A DXF with the same file name as a PDF is read together with it.
+      BOQs, specs and letters as documents (scanned pages are read too). A DXF with the same file name as a PDF is read together with it.
       DWG isn't supported - save it as DXF first.</p>
       <div class="step-nav"><button class="btn ghost" data-step="details">&larr; Details</button><button class="btn primary" data-step="scan">Next: Scan &rarr;</button></div>`;
     for (const slot of ["a", "b"]) {
@@ -2240,7 +2258,8 @@ class RunView {
     body.addEventListener("change", (e) => this.onInputField(e));
     api(`/api/runs/${this.id}/eta`).then((eta) => {
       const n = $("[data-eta]", body);
-      if (n) n.innerHTML = `<br>Estimated time: <strong>about ${fmtDuration(eta.seconds)}</strong> for ${plural(eta.pages, "page")}${eta.based_on >= 3 ? ` (from the last ${eta.based_on} scans on this server)` : ""}.`;
+      if (n) n.innerHTML = `<br>Estimated time: <strong>about ${fmtDuration(eta.seconds)}</strong> for ${plural(eta.pages, "page")}${eta.based_on >= 3 ? ` (from the last ${eta.based_on} scans on this server)` : ""}.`
+        + (eta.seconds > 2700 ? `<br><span class="warn-text">This is a large scan. To shorten it, set a review focus above, or remove drawings that are not part of this comparison.</span>` : "");
     }).catch(() => {});
   }
 
@@ -2286,12 +2305,13 @@ class RunView {
   }
 
   async cancel() {
-    if (!(await confirmDialog("Stop this scan? A stage that has already started finishes first, then the scan stops. Inputs stay as they are so you can start it again.",
+    if (!(await confirmDialog("Stop this scan? It stops as soon as the model call in progress finishes (usually within a minute). Inputs stay as they are so you can start it again.",
       { title: "Cancel scan", confirmLabel: "Cancel scan", danger: true }))) return;
     try {
       const r = await api(`/api/runs/${this.id}/cancel`, { method: "POST" });
       this.run.status = r.status;
-      toast(r.status === "cancelled" ? "Scan cancelled" : "Stopping after the current stage...");
+      this.stopping = r.status !== "cancelled";
+      toast(r.status === "cancelled" ? "Scan cancelled" : "Stopping the scan...");
       this.render();
       this.syncTimers();
       Jobs.poll();
@@ -2304,15 +2324,15 @@ class RunView {
         <span class="spinner" style="width:28px;height:28px;border-width:3px"></span>
         <div><div class="big" data-elapsed>0:00</div><div class="hint" data-phase></div></div>
         <span class="grow"></span>
-        <button class="btn danger" data-act="cancel">Cancel scan</button>
+        ${this.isStopping() ? `<button class="btn danger" disabled><span class="spinner sm"></span> Stopping&hellip;</button>` : `<button class="btn danger" data-act="cancel">Cancel scan</button>`}
       </div>
       <div class="progress-track"><div class="progress-fill" data-fill></div></div>
-      <div class="hint mono" data-msg style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+      <div class="hint" data-msg style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
       <ul class="stages" data-stages style="margin-top:12px"></ul>
-      <details style="margin-top:12px" ${local.get("log.open", false) ? "open" : ""} data-logbox><summary>Live log</summary><pre class="log" data-log></pre></details>
-      <p class="hint" style="margin-top:14px">You can close this tab or keep working &mdash; the scan keeps running on the server and you'll be notified when it finishes.</p>
+      ${isAdmin() ? `<details style="margin-top:12px" ${local.get("log.open", false) ? "open" : ""} data-logbox><summary>Diagnostics (admin)</summary><pre class="log" data-log></pre></details>` : ""}
     </section>`;
-    $("[data-logbox]", body).addEventListener("toggle", (e) => local.set("log.open", e.target.open));
+    const logbox = $("[data-logbox]", body);
+    if (logbox) logbox.addEventListener("toggle", (e) => local.set("log.open", e.target.open));
     this.renderProgress();
     this.tickElapsed();
   }
@@ -2329,14 +2349,24 @@ class RunView {
     const fill = $("[data-fill]", this.el);
     fill.classList.toggle("indet", queued);
     fill.style.width = `${Math.max(4, Math.round((done / (stages.length || 5)) * 100))}%`;
-    $("[data-msg]", this.el).textContent = p.message || (queued ? "" : "Starting...");
+    const running = stages.find((s) => s.status === "running");
+    $("[data-msg]", this.el).textContent = queued ? "" : (STAGE_TEXT[running ? running.key : ""] || "Starting...");
     $("[data-stages]", this.el).innerHTML = stages.map((s) => `<li class="${esc(s.status)}">
       <span class="ic">${s.status === "running" ? '<span class="spinner"></span>' : s.status === "done" ? "&#10003;" : s.status === "failed" ? "&times;" : s.status === "skipped" ? "&ndash;" : ""}</span>
       <span class="lbl grow">${esc(s.label)}</span><span class="muted small">${s.status === "skipped" ? "skipped - no findings" : s.status === "running" ? "in progress" : ""}</span></li>`).join("");
     const log = $("[data-log]", this.el);
+    if (!log) return;                       // the raw log is shown to admins only
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
     log.innerHTML = (p.log || []).map((l) => /error|failed|traceback/i.test(l) ? `<span class="err">${esc(l)}</span>` : esc(l)).join("\n");
     if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  coverageNote(res) {
+    const notes = res.coverage_notes || [];
+    const diag = res.warnings || [];
+    return notes.map((n) => `<div class="banner info" style="margin:12px 0 0"><span class="grow"><strong>Scan coverage:</strong> ${esc(n)}</span></div>`).join("")
+      + (isAdmin() && diag.length ? `<details style="margin-top:10px"><summary class="muted small">Diagnostics (admin, ${diag.length})</summary>
+        <ul class="small muted">${diag.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : "");
   }
 
   scanSummaryHtml(body) {
@@ -2344,13 +2374,15 @@ class RunView {
     const inp = this.inputs();
     const c = countsOf(this.run);
     const conf = (res.confidence_level || "medium").toLowerCase();
+    const stopped = (res.assessment || {}).verdict === "insufficient_input";
     const setStat = (doc, cls) => {
       if (!doc) return "";
       const files = (doc.files || []).map((f) => {
         const bits = [f.kind];
         if (f.sheets) bits.push(`${f.sheets} sheet(s)`);
         if (f.pages) bits.push(`${f.pages} page(s)`);
-        if (f.ocr_pages) bits.push(`${f.ocr_pages} OCR`);
+        if (f.ocr_pages) bits.push(`${f.ocr_pages} scanned`);
+        if (f.duplicate_of) bits.push(`same as ${f.duplicate_of} - read once`);
         if (f.requirements != null) bits.push(`${f.requirements} items`);
         return `<li>${esc(f.name)} <span class="muted">(${esc(bits.join(", "))})</span></li>`;
       }).join("");
@@ -2359,16 +2391,17 @@ class RunView {
         ${files ? `<ul>${files}</ul>` : ""}</div>`;
     };
     const log = (this.run.progress || {}).log || [];
-    body.innerHTML = `
+    body.innerHTML = `${this.verdictCard()}
       <section class="card">
         <div class="card-head"><div><h3>Scan complete</h3>
           <p class="hint">Finished ${timeEl(this.run.finished_at)}${res.duration_seconds ? ` in ${fmtDuration(res.duration_seconds)}` : ""}.</p></div>
-          <span class="row"><span class="muted small">Confidence</span><span class="conf ${esc(conf)}">${esc(conf.toUpperCase())}</span></span></div>
-        <p style="margin:0">${esc(res.scan_summary)}</p>
+          ${stopped ? "" : `<span class="row"><span class="muted small">Confidence</span><span class="conf ${esc(conf)}">${esc(conf.toUpperCase())}</span></span>`}</div>
+        ${stopped ? "" : `<p style="margin:0">${esc(res.scan_summary)}</p>`}
         <div class="summary-grid">${setStat(res.document_a, "")}${setStat(res.document_b, "b")}</div>
-        ${(res.warnings || []).map((w) => `<div class="banner warn" style="margin:12px 0 0"><span class="grow">${esc(w)}</span></div>`).join("")}
+        ${this.coverageNote(res)}
         <div class="downloads">
-          <button class="btn primary" data-step="findings">Review ${plural(c.findings, "finding")} &rarr;</button>
+          ${stopped ? `<button class="btn primary" data-act="clone">Add readable documents &amp; re-run</button>`
+            : `<button class="btn primary" data-step="findings">Review ${plural(c.findings, "finding")} &rarr;</button>`}
           ${c.rfis ? `<button class="btn" data-step="rfis">Edit ${plural(c.rfis, "RFI")}</button>` : ""}
           ${res.register_file ? `<a class="btn" href="/api/runs/${esc(this.id)}/exports/${encodeURIComponent(res.register_file)}">Register (.xlsx)</a>` : ""}
           ${c.findings ? `<button class="btn" data-act="register" title="Re-write the register with your triage, severity changes and RFI edits; dismissed findings are left out">Rebuild register with my edits</button>` : ""}
@@ -2384,7 +2417,7 @@ class RunView {
           <dt>Precedence</dt><dd>${esc(inp.document_precedence) || '<span class="muted">Not stated</span>'}</dd>
           <dt>RFI drafting</dt><dd>${inp.rfi_grouping === "single" ? "One RFI per finding" : "Related findings grouped"}</dd>
         </dl>
-        ${res.fleet && (res.fleet.roles || []).length ? `<details style="margin-top:14px"><summary>AI models used (${esc(res.fleet.profile)} profile &middot; ${res.fleet.calls} calls${res.fleet.cached ? `, ${res.fleet.cached} from cache` : ""})</summary>
+        ${isAdmin() && res.fleet && (res.fleet.roles || []).length ? `<details style="margin-top:14px"><summary>AI models used (${esc(res.fleet.profile)} profile &middot; ${res.fleet.calls} calls${res.fleet.cached ? `, ${res.fleet.cached} from cache` : ""})</summary>
           <table class="list compact" style="margin-top:8px"><thead><tr><th>Job</th><th>Model</th><th>Calls</th><th>Model time</th></tr></thead><tbody>
           ${res.fleet.roles.map((x) => `<tr><td>${esc(x.role.replace(/_/g, " "))}</td><td class="mono small">${esc(x.model)}</td><td>${x.calls}${x.cached ? ` <span class="muted">(${x.cached} cached)</span>` : ""}</td><td>${fmtDuration(x.seconds)}</td></tr>`).join("")}
           </tbody></table></details>` : ""}
@@ -2440,7 +2473,7 @@ class RunView {
           <button class="btn sm ghost" data-save-view title="Save these filters as a named view">Save view</button>
           <button class="btn sm ghost" data-print title="Print the findings shown">Print</button>` : ""}
         <select data-fstatus aria-label="Status filter">
-          ${[["all", "Any status"], ["open", "Open"], ["accepted", "Accepted"], ["dismissed", "Dismissed"], ["disputed", "Disputed by second opinion"]].map(([v, l]) => `<option value="${v}" ${f.status === v ? "selected" : ""}>${l}</option>`).join("")}
+          ${[["all", "Any status"], ["open", "Open"], ["accepted", "Accepted"], ["dismissed", "Dismissed"], ["disputed", "Set aside by the independent check"]].map(([v, l]) => `<option value="${v}" ${f.status === v ? "selected" : ""}>${l}</option>`).join("")}
         </select>
         <select data-fscope aria-label="Scope filter">
           <option value="all">Any scope</option>
@@ -2524,6 +2557,22 @@ class RunView {
     return { list, base, total: all.length };
   }
 
+  // The honest verdict of the scan (nodes/assessment.py), shown before any finding.
+  verdictCard(compact = false) {
+    const a = this.results().assessment;
+    if (!a || !a.verdict) return "";
+    const tone = { consistent: "ok", minor_only: "ok", conflicts: "bad", no_overlap: "warn", insufficient_input: "warn" }[a.verdict] || "info";
+    const cmp = a.compared || {};
+    const facts = a.verdict === "insufficient_input" ? "" : [
+      cmp.pairs != null ? `${cmp.pairs} pair(s) compared` : "", cmp.items_a != null ? `${cmp.items_a} / ${cmp.items_b} statements in the two sets` : "",
+      (a.counts || {}).doubted ? `${a.counts.doubted} set aside by the independent check` : "",
+      (a.counts || {}).uncertain ? `${a.counts.uncertain} to confirm on the documents` : ""].filter(Boolean).join(" &middot; ");
+    const lim = (a.limitations || []).length ? `<details class="verdict-lim" ${compact ? "" : "open"}><summary>What limited this scan (${a.limitations.length})</summary>
+      <ul>${a.limitations.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "";
+    return `<section class="verdict ${tone} ${compact ? "compact" : ""}"><div class="v-label">${esc(a.label)}</div>
+      <p class="v-head">${esc(a.headline)}</p>${facts ? `<div class="v-facts">${facts}</div>` : ""}${lim}</section>`;
+  }
+
   changesBanner() {
     const ch = this.results().changes;
     if (!ch) return "";
@@ -2545,7 +2594,7 @@ class RunView {
     this.renderSevChips(base);
     $("[data-fcount]", this.el).textContent = list.length === total ? plural(total, "finding") : `Showing ${list.length} of ${total}`;
     const rfiMap = this.rfiByFinding();
-    wrap.innerHTML = this.bulkBar() + this.changesBanner() + (list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
+    wrap.innerHTML = this.bulkBar() + this.verdictCard(true) + this.changesBanner() + (list.length ? list.map((d) => this.findingHtml(d, rfiMap)).join("")
       : `<div class="card empty"><h3>No findings match these filters</h3><button class="btn" data-act="reset-filters">Clear filters</button></div>`);
     requestAnimationFrame(() => $$("textarea", wrap).forEach(autoGrow));
     if (window.CS.mountComments) {
@@ -2601,7 +2650,7 @@ class RunView {
     const ref = (e) => {
       const where = [e.file, e.reference].filter(Boolean).join(" · ");
       const view = e.file ? ` <button class="link-btn small" data-ev="${esc(e.file)}" data-evq="${esc(e.says || "")}" data-evr="${esc(e.reference || "")}" title="Open the source page with these words highlighted">view in document</button>` : "";
-      return (where ? `<div class="ref">${esc(where)}${view}</div>` : "") + (e.low_confidence ? `<div class="ref verify-note">verify - OCR / partly legible</div>` : "");
+      return (where ? `<div class="ref">${esc(where)}${view}</div>` : "") + (e.low_confidence ? `<div class="ref verify-note">to confirm on the document</div>` : "");
     };
     let cols;
     if (evidence.length && (d.scope === "within_a" || d.scope === "within_b")) {
@@ -2627,12 +2676,12 @@ class RunView {
         <span class="f-tags">
           ${d.issue_class ? `<span class="badge class">${esc(classes[d.issue_class] || d.issue_class.replace(/_/g, " "))}</span>` : ""}
           ${scope ? `<span class="badge scope">${esc(scope)}</span>` : ""}
-          ${d.low_confidence ? `<span class="badge verify" title="Rests on OCR text or partly legible drawing values">verify</span>` : ""}
+          ${d.low_confidence ? `<span class="badge verify" title="A value here should be checked on the document before acting on it">to confirm</span>` : ""}
           ${d.change === "new" && this.results().changes ? `<span class="badge chg-new" title="Not in Rev ${esc(this.results().changes.base_seq)}">new</span>` : ""}
           ${d.change === "changed" ? `<span class="badge chg-changed" title="${esc((d.change_detail || []).join("; "))}">changed</span>` : ""}
           ${rv.carried_from ? `<span class="badge outline" title="Your triage from ${esc(rv.carried_from)} was carried over${rv.reopened ? " - reopened: " + esc(rv.reopened) : ""}">&#8617; ${esc(rv.carried_from)}</span>` : ""}
-          ${d.disputed ? `<span class="badge disputed" title="${esc((d.verification || {}).reason || "An independent model judged this not to be a real conflict")}">second opinion: not a conflict</span>`
-            : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent model (${esc(d.verification.model || "")})">&#10003; double-checked</span>` : ""}
+          ${d.disputed ? `<span class="badge disputed" title="${esc((d.verification || {}).reason || "An independent check judged this not to be a real conflict")}">independent check: not a conflict</span>`
+            : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent check">&#10003; double-checked</span>` : ""}
           ${status !== "open" ? `<span class="badge ${status === "accepted" ? "ok" : "outline"}">${esc(status)}</span>` : ""}
           ${rv.note ? `<span class="badge outline" title="${esc(rv.note)}">note</span>` : ""}
           ${this.commentCounts[`finding:${d.id}`] ? `<span class="badge outline" title="Comments">&#128172; ${this.commentCounts[`finding:${d.id}`]}</span>` : ""}
@@ -2646,7 +2695,7 @@ class RunView {
         <p>${esc(d.description)}</p>
         <div class="side-by-side" style="grid-template-columns:repeat(${cols.length},1fr)">${cols.map((c) => `<div class="${c.cls}"><div class="side-label">${c.title}</div>${c.body}</div>`).join("")}</div>
         ${d.impact ? `<p><strong>Impact:</strong> ${esc(d.impact)}</p>` : ""}
-        ${d.verification ? `<p class="second-opinion ${d.disputed ? "disputed" : ""}"><strong>Second opinion</strong> (${esc(d.verification.model || "independent model")}):
+        ${d.verification ? `<p class="second-opinion ${d.disputed ? "disputed" : ""}"><strong>Independent check:</strong>
           ${esc({ confirmed: "confirmed", not_a_conflict: "not a real conflict", unsure: "unsure" }[d.verification.verdict] || d.verification.verdict)}
           ${d.verification.reason ? `&mdash; ${esc(d.verification.reason)}` : ""}${d.vote ? ` <span class="muted">(vote ${d.vote.for} for / ${d.vote.against} against)</span>` : ""}</p>` : ""}
         ${d.suggested_question ? `<p><strong>Clarification sought:</strong> ${esc(d.suggested_question)}</p>` : ""}
@@ -2824,7 +2873,7 @@ class RunView {
         <span data-rfi-save></span>
       </div>
       ${ids.length ? `<div class="linked"><span class="muted">From findings:</span>${ids.map((id) => `<button class="badge outline" data-goto-finding="${esc(id)}">${esc(id)}</button>`).join("")}
-        ${rfi.low_confidence ? `<span class="badge verify">verify OCR / partly legible values</span>` : ""}</div>` : ""}
+        ${rfi.low_confidence ? `<span class="badge verify">contains values to confirm</span>` : ""}</div>` : ""}
       <div class="meta-row">
         ${rfi.log_id ? `<label class="field"><span>Status</span><button class="btn block" data-act="open-log" title="Approval, issue and response are tracked in the RFI log">In the RFI log &rarr;</button></label>`
           : `<label class="field"><span>Status</span><select data-rf="status">${RFI_STATUS.map(([v, l]) => `<option value="${v}" ${(rfi.status || "draft") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`}

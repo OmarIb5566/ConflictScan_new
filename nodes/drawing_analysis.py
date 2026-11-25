@@ -209,6 +209,7 @@ def _fallback_baseline_items(batch: List[Dict[str, Any]], start: int, review_foc
             "attribute": "as stated",
             "baseline_value": req.get("value"),
             "baseline_reference": req.get("reference") or "",
+            "scopes": list(req.get("scopes") or []),
             "in_focus": _in_focus(f"{topic} {req.get('statement') or ''}", review_focus),
         })
     return items
@@ -273,6 +274,7 @@ def build_baseline_set(reference_profile: Dict[str, Any], reference_slot: str, r
                 "attribute": _text(raw.get("attribute")) or "as stated",
                 "baseline_value": _text(raw.get("baseline_value")) or src.get("value"),
                 "baseline_reference": src.get("reference") or "",
+                "scopes": list(src.get("scopes") or []),
                 "in_focus": bool(raw.get("in_focus", True)) if review_focus else True,
             })
 
@@ -309,6 +311,16 @@ def build_baseline_set(reference_profile: Dict[str, Any], reference_slot: str, r
     }
 
 
+def _scoped_baseline(baseline: Optional[Dict[str, Any]], source_name: str) -> Optional[Dict[str, Any]]:
+    """Baseline items whose structure can appear on this drawing (by its file name); all when unknown."""
+    if not baseline or not baseline.get("items"):
+        return baseline
+    from nodes.scope import structures, scopes_compatible
+    shown = structures(source_name)
+    items = [it for it in baseline["items"] if scopes_compatible(it.get("scopes"), shown)]
+    return {**baseline, "items": items or baseline["items"]}
+
+
 def _checklist(baseline: Optional[Dict[str, Any]]) -> Tuple[str, set]:
     """The baseline as the vision model sees it: ids, categories, elements, attributes - never values."""
     if not baseline or not baseline.get("items"):
@@ -320,8 +332,9 @@ def _checklist(baseline: Optional[Dict[str, Any]]) -> Tuple[str, set]:
     shown = baseline["items"][:MAX_CHECKLIST_ITEMS]
     lines = [
         f"BASELINE CHECKLIST from '{baseline['reference_label']}' - what this drawing is expected "
-        f"to show. Look for each of these specifically and put its id in \"baseline_ids\" on the "
-        f"item that addresses it. You are NOT told the required values: report only what is drawn.",
+        f"to show. Look for each of these specifically. Put an id in \"baseline_ids\" only on an item "
+        f"that IS that element and attribute (at most 2 ids). You are NOT told the required values: "
+        f"report only what is drawn.",
     ]
     for it in shown:
         lines.append(f"{it['id']} [{it['category'] or 'unclassified'}] {it['element']} - {it['attribute']}")
@@ -1275,22 +1288,12 @@ Return a JSON object with exactly these keys:
 
 {{
   "items": [
-    {{
-      "category": "<one category key from the list above>",
-      "discipline": "<structural|architectural|civil|mechanical|electrical|plumbing|landscape|general>",
-      "element": "<the element as identified on the drawing>",
-      "element_id": "<its tag / mark / number as written (e.g. a beam mark, panel name, manhole no.), else null>",
-      "attribute": "<what the annotation specifies about that element>",
-      "value": "<exactly as written on the drawing, or null if unreadable / not given>",
-      "legibility": "clear|partial|unreadable",
-      "view": "plan|section|elevation|detail|schedule|diagram|note|legend|title_block",
-      "statement": "<one sentence binding the annotation to the geometry it labels and where it sits>",
-      "location": "<building / block / zone / floor / room this item is in, as written on the sheet, else null>",
-      "grid_zone": "<grid reference (axes) as drawn in this tile, else null>",
-      "section_ref": "<section / detail / view title or bay mark this item belongs to, else null>",
-      "in_revision_cloud": <true|false>,
-      "baseline_ids": ["<checklist ids this item directly addresses>"]
-    }}
+    {{"category": "<category key>", "element": "<the element as identified on the drawing>",
+      "element_id": "<tag / mark / number as written, else null>",
+      "attribute": "<what the annotation specifies about it>", "value": "<exactly as written, null if unreadable>",
+      "view": "plan|section|elevation|detail|schedule|diagram|note|legend",
+      "location": "<building / zone / room as written, else null>", "grid_zone": "<grid axes, else null>",
+      "section_ref": "<section / detail title or bay mark, else null>", "baseline_ids": []}}
   ],
   "quantities": [
     {{"description": "<what is counted or measured>", "amount": <number or null>, "unit": "<unit or null>", "reference": "<schedule/table/row reference, else null>"}}
@@ -1301,10 +1304,15 @@ Return a JSON object with exactly these keys:
 }}
 
 Rules:
-- Return ONLY valid JSON. No markdown fences, no preamble.
+- Return ONLY valid JSON. No markdown fences, no preamble. Keep it compact:
+  one item per line, no extra fields, no explanations.
+- Add "legibility": "partial" or "unreadable" ONLY when a value is not fully
+  legible, and "in_revision_cloud": true ONLY for items inside a revision
+  cloud - omit both otherwise.
 - NEVER invent data. If an element is visible but its value cannot be read,
   report it with "value": null and "legibility": "unreadable". If only part is
   legible, transcribe only that part and mark "partial".
+- Report each annotation ONCE. Never repeat an item.
 - Report only what IS shown. Never add an item saying something is not
   visible or not present in this tile - use "notes" for that.
 - Transcribe values exactly as written - bar marks, sizes, grades, levels,
@@ -1313,7 +1321,8 @@ Rules:
   table rows, notes). Never count symbols yourself.
 - If an annotation's target is cut off at the tile edge, omit it (an
   overlapping tile covers it) or mark it "partial".
-- "baseline_ids" may only contain ids from the supplied checklist; [] when none applies.
+- "baseline_ids": at most 2 ids from the supplied checklist, and only when the
+  item IS that checklist element and attribute; [] otherwise (most items).
 - Every text value must come from what is visible in this tile - never copy
   wording from these instructions.
 """
@@ -1430,7 +1439,9 @@ def _item_to_requirement(item: Dict[str, Any], sheet_ref: str, region: str, vali
                          checklist: Optional[set] = None) -> Optional[Dict[str, Any]]:
     element = _text(item.get("element"))
     attribute = _text(item.get("attribute"))
-    statement = _text(item.get("statement"))
+    statement = _text(item.get("statement")) or (
+        " ".join(p for p in (element, attribute) if p)
+        + (f": {_text(item.get('value'))}" if _text(item.get("value")) else ""))
     if not (element or statement):
         return None
 
@@ -1507,14 +1518,10 @@ def _second_reading(requirements: List[Dict[str, Any]], prompt: str, tile: Dict[
         tokens = _value_tokens(req["value"])
         agree = bool(tokens) and sum(1 for t in tokens if t in seen) / len(tokens) >= 0.5
         req["second_reading"] = "agrees" if agree else "differs"
-        if agree and req.get("value_unverified"):
-            # Two independent readers saw the same value: still 'verify', but say so.
-            req["statement"] = req["statement"].replace("(value not found in the sheet's text - verify)",
-                                                        "(value read by two models but not in the sheet's text - verify)")
         if not agree and not req.get("low_confidence"):
             req["legibility"] = "partial"
             req["low_confidence"] = True
-            req["statement"] = f"{req['statement']} (a second reading of the sheet saw a different value - verify)"
+            req["value_unverified"] = True
             flagged += 1
     return flagged
 
@@ -1543,8 +1550,7 @@ def _verify_values(requirements: List[Dict[str, Any]], strings: List[str]) -> in
         if found / len(tokens) < 0.5:
             req["legibility"] = "partial"
             req["low_confidence"] = True
-            req["value_unverified"] = True
-            req["statement"] = f"{req['statement']} (value not found in the sheet's text - verify)"
+            req["value_unverified"] = True       # a flag only - never written into what users read
             flagged += 1
     return flagged
 
@@ -1565,21 +1571,48 @@ def _drawing_quote(req: Dict[str, Any], strings: List[str]) -> str:
     return value
 
 
+TILE_BUDGET_BASE = 400            # output tokens for a tile with no known text
+TILE_BUDGET_PER_STRING = 250      # ... plus this per text string the tile carries (an item is ~110 tokens)
+
+
+def tile_output_budget(strings: Optional[List[str]]) -> int:
+    """
+    A tile can only hold as many facts as it has annotations. Bounding the
+    reply by its text stops a model that starts permuting one callout into
+    dozens of items (seen on real sheets) - complete items are still kept.
+    Tiles whose text is unknown keep the full budget.
+    """
+    from nodes.llm_client import NUM_PREDICT
+    if strings is None:
+        return NUM_PREDICT
+    return min(NUM_PREDICT, TILE_BUDGET_BASE + TILE_BUDGET_PER_STRING * len(strings))
+
+
 def _extract_tile(prompt: str, tile: Dict[str, Any], sheet_ref: str, doc_label: str, valid_ids: set,
                   overview: Optional[Dict[str, Any]] = None, checklist: Optional[set] = None,
-                  tile_strings: Optional[List[str]] = None) -> Dict[str, Any]:
+                  tile_strings: Optional[List[str]] = None, text_source: str = "") -> Dict[str, Any]:
     try:
-        result = _run_json(_get_vision_llm(), system=_TILE_SYSTEM, user=prompt, images=[tile["path"]], temperature=0.1)
+        result = _run_json(_get_vision_llm(), system=_TILE_SYSTEM, user=prompt, images=[tile["path"]], temperature=0.1,
+                           options={"num_predict": tile_output_budget(
+                               tile_strings if text_source == "text layer" else None)})
     except Exception as exc:
         print(f"[drawing_analysis] {doc_label} sheet {sheet_ref} tile ({tile['region']}) vision call failed: {exc}")
         return {
             "requirements": [], "quantities": [], "standards": [], "entities": [],
             "notes": f"Vision LLM error on sheet {sheet_ref} ({tile['region']}): {exc}",
+            "failed": True,
         }
 
+    cut_off = bool(result.pop("_truncated", False))
+    result.pop("_repeated", None)
     requirements = []
+    seen_items = set()
     for item in result.get("items") or []:
         if isinstance(item, dict):
+            sig = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+            if sig in seen_items:          # vision models sometimes repeat an item verbatim
+                continue
+            seen_items.add(sig)
             req = _item_to_requirement(item, sheet_ref, tile["region"], valid_ids, overview, checklist)
             if req:
                 requirements.append(req)
@@ -1604,6 +1637,7 @@ def _extract_tile(prompt: str, tile: Dict[str, Any], sheet_ref: str, doc_label: 
         "entities": _text_list(result.get("entities")),
         "notes": _text(result.get("notes")),
         "unverified_values": unverified,
+        "cut_off": cut_off,
     }
 
 
@@ -1822,7 +1856,10 @@ def build_drawing_profile(
             f"visually, so legibility depends on the image quality."
         )
 
-    checklist_text, checked_ids = _checklist(baseline)
+    # The checklist holds only what can apply to this drawing's structure (a tank drawing is not
+    # searched for pump-station clauses); the full baseline is kept for pairing.
+    reading_baseline = _scoped_baseline(baseline, source_name)
+    checklist_text, checked_ids = _checklist(reading_baseline)
     dxf_context = _dxf_context(dxf) if dxf else ""
 
     results: List[Dict[str, Any]] = []
@@ -1833,11 +1870,15 @@ def build_drawing_profile(
 
     debug_sheets: List[Dict[str, Any]] = []
     debug_tiles: List[Dict[str, Any]] = []
-    total_tiles = blank_tiles = ocr_tiles = unverified_values = 0
+    total_tiles = blank_tiles = ocr_tiles = unverified_values = cut_off_tiles = failed_tiles = 0
     checklist = _checklist_phrases(baseline)
 
-    for sheet in sheets:
-        overview = _extract_sheet_overview(sheet, label, dxf_context)
+    from fleet import pmap
+    # Sheet overviews side by side, then every tile of every sheet in ONE parallel pool: with a pool
+    # per sheet, the model's parallel slots sit idle while each sheet's slowest tile finishes.
+    overviews = pmap(lambda sh: _extract_sheet_overview(sh, label, dxf_context), sheets, role="drawing_overview")
+    work = []
+    for sheet, overview in zip(sheets, overviews):
         sheet_ref = overview["sheet_number"] or sheet["name"]
         results.append(_overview_result(overview, sheet_ref))
 
@@ -1852,42 +1893,47 @@ def build_drawing_profile(
             "text_height_px": sheet.get("text_height_px"), "text_line_count": len(sheet["text_lines"]),
             "overview": overview,
         })
-
-        work = []
         for i, tile in enumerate(tiles, start=1):
             if len(tiles) > 1 and _ink_fraction(tile["path"]) < BLANK_TILE_INK:
                 blank_tiles += 1
                 continue
-            work.append((i, tile))
-        total_tiles += len(work)
+            # A vector sheet carries every annotation in its text layer: a tile with no text on such a
+            # sheet is pure linework - nothing to read, and anything "read" there would be invented.
+            if len(tiles) > 1 and len(sheet.get("text_lines") or []) >= 20 and not _tile_strings(sheet, tile)[0]:
+                blank_tiles += 1
+                continue
+            work.append((sheet, sheet_ref, overview, tiles, i, tile))
+    total_tiles += len(work)
 
-        def _read_tile(job, sheet=sheet, sheet_ref=sheet_ref, overview=overview, tiles=tiles):
-            i, tile = job
-            strings, text_source = _tile_strings(sheet, tile)
-            prompt = _tile_prompt(
-                sheet_ref, overview, tile, i, len(tiles), strings, checklist_text,
-                review_focus, dxf_quantities=bool(dxf), text_source=text_source,
-            )
-            print(f"[drawing_analysis]   -> '{label}' sheet {sheet_ref} tile {i}/{len(tiles)} ({tile['region']}, "
-                  f"{len(strings)} {text_source} string(s))")
-            result = _extract_tile(prompt, tile, sheet_ref, label, checked_ids, overview, checklist, strings)
-            result["second_reading_flags"] = _second_reading(result.get("requirements") or [], prompt, tile, strings)
-            print(
-                f"[drawing_analysis]      {len(result['requirements'])} item(s), "
-                f"{len(result['quantities'])} quantity item(s)"
-            )
-            return i, tile, strings, text_source, result
+    def _read_tile(job):
+        sheet, sheet_ref, overview, tiles, i, tile = job
+        strings, text_source = _tile_strings(sheet, tile)
+        prompt = _tile_prompt(
+            sheet_ref, overview, tile, i, len(tiles), strings, checklist_text,
+            review_focus, dxf_quantities=bool(dxf), text_source=text_source,
+        )
+        print(f"[drawing_analysis]   -> '{label}' sheet {sheet_ref} tile {i}/{len(tiles)} ({tile['region']}, "
+              f"{len(strings)} {text_source} string(s))")
+        result = _extract_tile(prompt, tile, sheet_ref, label, checked_ids, overview, checklist, strings,
+                               text_source)
+        result["second_reading_flags"] = _second_reading(result.get("requirements") or [], prompt, tile, strings)
+        print(
+            f"[drawing_analysis]      {len(result['requirements'])} item(s), "
+            f"{len(result['quantities'])} quantity item(s)"
+        )
+        return sheet_ref, len(tiles), i, tile, strings, text_source, result
 
-        from fleet import pmap
-        for i, tile, strings, text_source, result in pmap(_read_tile, work, role="drawing_reader"):
-            ocr_tiles += text_source == "ocr"
-            unverified_values += result.pop("unverified_values", 0) + result.pop("second_reading_flags", 0)
-            results.append(result)
-            debug_tiles.append({
-                "sheet": sheet_ref, "tile": i, "total_tiles": len(tiles), "region": tile["region"],
-                "box": tile["box"], "tile_image_path": str(tile["path"]), "text_source": text_source,
-                "tile_strings": strings, **result,
-            })
+    for sheet_ref, n_tiles, i, tile, strings, text_source, result in pmap(_read_tile, work, role="drawing_reader"):
+        ocr_tiles += text_source == "ocr"
+        unverified_values += result.pop("unverified_values", 0) + result.pop("second_reading_flags", 0)
+        cut_off_tiles += bool(result.pop("cut_off", False))
+        failed_tiles += bool(result.pop("failed", False))
+        results.append(result)
+        debug_tiles.append({
+            "sheet": sheet_ref, "tile": i, "total_tiles": n_tiles, "region": tile["region"],
+            "box": tile["box"], "tile_image_path": str(tile["path"]), "text_source": text_source,
+            "tile_strings": strings, **result,
+        })
 
     if blank_tiles:
         print(f"[drawing_analysis] '{label}': {blank_tiles} blank tile(s) skipped")
@@ -1895,6 +1941,17 @@ def build_drawing_profile(
         warnings.append(
             f"'{source_name}' has no usable text layer - the text of {ocr_tiles} tile(s) was OCR-read and used to "
             f"anchor the values the drawing reader reported."
+        )
+    if failed_tiles:
+        warnings.append(
+            f"{failed_tiles} of {total_tiles} tile(s) of '{source_name}' could not be read (the vision model did not "
+            f"answer) - nothing on those parts of the sheets was compared."
+        )
+    if cut_off_tiles:
+        warnings.append(
+            f"The drawing reader's reply was cut off on {cut_off_tiles} of {total_tiles} tile(s) of '{source_name}' "
+            f"(the model got stuck repeating itself). Every complete item on those tiles was kept, but some details "
+            f"of those tiles may not have been read."
         )
     if unverified_values:
         warnings.append(
@@ -1904,8 +1961,8 @@ def build_drawing_profile(
         )
 
     all_requirements = [req for r in results for req in r["requirements"]]
-    coverage = _baseline_coverage(baseline, checked_ids, all_requirements)
-    warnings.extend(_review_warnings(label, baseline, coverage, all_requirements))
+    coverage = _baseline_coverage(reading_baseline, checked_ids, all_requirements)
+    warnings.extend(_review_warnings(label, reading_baseline, coverage, all_requirements))
 
     merged = _merge_chunk_results(results)
     merged["requirements"].sort(key=lambda r: category_rank(r.get("category", "")))
@@ -1919,6 +1976,8 @@ def build_drawing_profile(
         "char_count": 0,               # not text-based - char count is not meaningful here
         "chunk_count": total_tiles,
         "total_chunk_count": total_tiles,
+        "cut_off_tiles": cut_off_tiles,
+        "failed_tiles": failed_tiles,
         "focus_status": "no_focus",    # drawings are always read in full; focus is applied at the diff
         **merged,
         "drawing_inputs": drawing_inputs,

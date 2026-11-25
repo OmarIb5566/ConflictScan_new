@@ -28,18 +28,27 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _output_dir: ContextVar[Optional[str]] = ContextVar("conflictscan_output_dir", default=None)
 _debug_dir: ContextVar[Optional[str]] = ContextVar("conflictscan_debug_dir", default=None)
+_checkpoint_dir: ContextVar[Optional[str]] = ContextVar("conflictscan_checkpoint_dir", default=None)
 
 
 @contextmanager
-def scan_dirs(output_dir: Optional[str] = None, debug_dir: Optional[str] = None):
+def scan_dirs(output_dir: Optional[str] = None, debug_dir: Optional[str] = None,
+              checkpoint_dir: Optional[str] = None):
     """Route this scan's files into its own folders (created on demand)."""
     out_token = _output_dir.set(output_dir)
     dbg_token = _debug_dir.set(debug_dir)
+    cp_token = _checkpoint_dir.set(checkpoint_dir)
     try:
         yield
     finally:
         _output_dir.reset(out_token)
         _debug_dir.reset(dbg_token)
+        _checkpoint_dir.reset(cp_token)
+
+
+def checkpoint_dir() -> Optional[str]:
+    """Folder where this scan's stage checkpoints live (stable across retries of the scan), or None."""
+    return _checkpoint_dir.get()
 
 
 def output_dir() -> str:

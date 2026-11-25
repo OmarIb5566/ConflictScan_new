@@ -35,6 +35,18 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from fleet import profile as profiles
 
 current_run: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("fleet_run", default=None)
+# Set by the scan worker: a function that says whether the user cancelled this scan.
+cancel_check: contextvars.ContextVar[Optional[Callable[[], bool]]] = contextvars.ContextVar("fleet_cancel", default=None)
+
+
+class ScanCancelled(Exception):
+    """The user cancelled the scan; raised before the next model call so a long stage stops quickly."""
+
+
+def _check_cancelled() -> None:
+    check = cancel_check.get()
+    if check is not None and check():
+        raise ScanCancelled("Cancelled by the user.")
 
 _installed: Dict[str, Tuple[float, List[str]]] = {}
 _installed_lock = threading.Lock()
@@ -213,15 +225,58 @@ def _post(server: Dict[str, Any], payload: Dict[str, Any], timeout: float = 900)
         data = r.json()
         usage = data.get("usage") or {}
         return {"content": data["choices"][0]["message"].get("content") or "",
-                "prompt_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")}
-    r = http.post(server["url"] + "/api/chat", json=payload, timeout=timeout)
-    if r.status_code == 400 and "think" in payload and "think" in r.text.lower():
-        payload = {k: v for k, v in payload.items() if k != "think"}
-        r = http.post(server["url"] + "/api/chat", json=payload, timeout=timeout)
+                "prompt_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
+                "truncated": data["choices"][0].get("finish_reason") == "length"}
+    body = {**payload, "stream": True}
+    r = http.post(server["url"] + "/api/chat", json=body, timeout=timeout, stream=True)
+    if r.status_code == 400 and "think" in body:
+        if "think" in r.text.lower():
+            body = {k: v for k, v in body.items() if k != "think"}
+            r = http.post(server["url"] + "/api/chat", json=body, timeout=timeout, stream=True)
     r.raise_for_status()
-    data = r.json()
-    return {"content": (data.get("message") or {}).get("content") or "",
-            "prompt_tokens": data.get("prompt_eval_count"), "output_tokens": data.get("eval_count")}
+    return _read_stream(r)
+
+
+LOOP_WINDOW = 1200      # chars: a reply whose last LOOP_WINDOW chars already appeared twice is looping
+LOOP_CHECK_EVERY = 1500
+
+
+def is_looping(text: str) -> bool:
+    """True when the reply's tail is a verbatim repeat of earlier output, seen at least twice before."""
+    if len(text) < LOOP_WINDOW * 3:
+        return False
+    tail = text[-LOOP_WINDOW:]
+    return text.count(tail, 0, len(text) - LOOP_WINDOW) >= 2
+
+
+def _read_stream(r) -> Dict[str, Any]:
+    """Collect an Ollama streamed chat reply; stop it early when the model is stuck repeating itself."""
+    parts: List[str] = []
+    size, next_check, last = 0, LOOP_CHECK_EVERY, {}
+    looped = False
+    try:
+        for line in r.iter_lines():
+            if not line:
+                continue
+            last = json.loads(line)
+            if last.get("error"):
+                raise RuntimeError(last["error"])
+            piece = (last.get("message") or {}).get("content") or ""
+            if piece:
+                parts.append(piece)
+                size += len(piece)
+            if last.get("done"):
+                break
+            if size >= next_check:
+                next_check = size + LOOP_CHECK_EVERY
+                if is_looping("".join(parts)):
+                    looped = True
+                    break
+    finally:
+        r.close()                  # closing the stream also stops generation on the server
+    return {"content": "".join(parts), "prompt_tokens": last.get("prompt_eval_count"),
+            "output_tokens": last.get("eval_count") or (size // 4 if looped else None),
+            "truncated": looped or last.get("done_reason") == "length", "looped": looped}
 
 
 def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = None, temperature: float = 0.1,
@@ -240,6 +295,7 @@ def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = No
     candidates = [(model, resolve(role)[0][1])] if model and resolve(role) else resolve(role)
     last_error: Optional[BaseException] = None
 
+    _check_cancelled()
     for model_name, server in candidates:
         payload: Dict[str, Any] = {
             "model": model_name,
@@ -267,6 +323,7 @@ def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = No
             payload["messages"][1]["images"] = encoded
 
         for attempt in range(max_retries + 1):
+            _check_cancelled()
             if attempt:
                 time.sleep(min(20, 4 * attempt))
             started = time.time()
@@ -277,9 +334,12 @@ def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = No
                 content = out["content"]
                 if not content.strip():
                     raise ValueError("empty reply")
+                truncated = bool(out.get("truncated"))
                 _log_call(role, model_name, server, (time.time() - started) * 1000, out.get("prompt_tokens"),
-                          out.get("output_tokens"), len(images))
-                if key:
+                          out.get("output_tokens"), len(images),
+                          error=("stopped: the model was repeating itself" if out.get("looped")
+                                 else "cut off at the output limit") if truncated else None)
+                if key and not truncated:          # a cut-off reply is never replayed from the cache
                     _cache_put(key, role, model_name, content)
                 return content
             except Exception as exc:  # noqa: BLE001
@@ -311,9 +371,10 @@ class RoleLLM:
         return resolved_model(self.role) or ""
 
     def run(self, system: str, user: str, temperature: float = 0.2, max_retries: int = 2,
-            images: Optional[Sequence[str]] = None, model: Optional[str] = None) -> dict:
+            images: Optional[Sequence[str]] = None, model: Optional[str] = None,
+            options: Optional[Dict[str, Any]] = None) -> dict:
         text = call(self.role, system, user, images=images, temperature=temperature, max_retries=max_retries,
-                    model=model)
+                    model=model, options=options)
         return self._json(_strip_thinking(text))
 
     def text(self, system: str, user: str, temperature: float = 0.2, **kw) -> str:

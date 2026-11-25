@@ -265,7 +265,9 @@ def test_full_graph_with_the_fleet(monkeypatch, tmp_path):
             document_b_files=[{"name": "sld.txt", "path": str(sld), "kind": "document"}],
             project_name="Fleet", rfi_template_path=os.path.join(api.__file__, "..", "templates_rfi", "none.docx"),
             output_dir=str(tmp_path / "out"))
-    assert {"extractor", "adjudicator", "verifier", "drafter"} <= set(roles_used)
+    assert {"extractor", "adjudicator", "verifier"} <= set(roles_used)
+    # the only finding was doubted by the verifier, so it is shown for review but not drafted into an RFI
+    assert "drafter" not in roles_used and state["rfi_items"] == []
     disc = state["discrepancies"][0]
     assert disc["disputed"] and disc["verification"]["reason"] == "different transformers"
     assert any("independent check" in w for w in state.get("analysis_warnings", []))

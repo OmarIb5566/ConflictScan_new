@@ -758,6 +758,48 @@ def _mark_ocr_items(profile: Dict[str, Any], ocr_pages: List[int], total_pages: 
             item["text_source"] = "ocr"
 
 
+DUPLICATE_SIMILARITY = 0.85      # share of 5-word phrases two documents have in common to be one document
+
+
+def _shingles(text: str) -> set:
+    words = re.findall(r"\w+", (text or "").lower())
+    return {" ".join(words[i:i + 5]) for i in range(max(0, len(words) - 4))}
+
+
+def _drop_duplicate_documents(jobs):
+    """
+    The same document uploaded twice in one set (e.g. a specification as .docx
+    and as .pdf) is read once: reading it twice doubles every clause, and two
+    readings of one text never extract identically. The PDF copy is kept when
+    there is one (its page numbers make references citable).
+    Returns (jobs to profile, [(slot, skipped entry, name of the copy kept)]).
+    """
+    from nodes.file_ingest import read_document
+    for _slot, _idx, entry in jobs:
+        if entry.get("kind") != "text" and entry.get("path") and "_doc" not in entry:
+            try:
+                entry["_doc"] = read_document(entry["path"])
+            except Exception as exc:  # noqa: BLE001 - profiled (and reported) as usual
+                print(f"[analyze_documents] could not pre-read {entry.get('name')}: {exc}")
+    def text_of(entry):
+        return entry.get("text") if entry.get("kind") == "text" else (entry.get("_doc") or {}).get("text", "")
+    ordered = sorted(jobs, key=lambda j: (j[0], 0 if str(j[2].get("name", "")).lower().endswith(".pdf") else 1, j[1]))
+    kept, dropped, seen = [], [], []
+    for slot, idx, entry in ordered:
+        sh = _shingles(text_of(entry))
+        twin = next((name for s2, name, other in seen if s2 == slot and sh and other
+                     and len(sh & other) / max(1, min(len(sh), len(other))) >= DUPLICATE_SIMILARITY), None)
+        if twin:
+            print(f"[analyze_documents] '{entry.get('name')}' duplicates '{twin}' - read once")
+            entry.pop("_doc", None)
+            dropped.append((slot, entry, twin))
+            continue
+        seen.append((slot, entry.get("name") or "document", sh))
+        kept.append((slot, idx, entry))
+    kept.sort(key=lambda j: (j[0], j[1]))
+    return kept, dropped
+
+
 def _profile_text_file(entry: Dict[str, Any], slot: str, label: str, review_focus: str):
     name = entry.get("name") or "document"
     ocr_pages: List[int] = []
@@ -766,12 +808,16 @@ def _profile_text_file(entry: Dict[str, Any], slot: str, label: str, review_focu
     if entry.get("kind") == "text":
         text = entry.get("text") or ""
     else:
-        from nodes.file_ingest import read_document
-        doc = read_document(entry["path"])
+        doc = entry.pop("_doc", None)       # read once by the duplicate check
+        if doc is None:
+            from nodes.file_ingest import read_document
+            doc = read_document(entry["path"])
         text, ocr_pages, pages, file_warnings = doc["text"], doc["ocr_pages"], doc["pages"], doc["warnings"]
 
     profile = build_document_profile(text, label, slot, name, review_focus)
     _mark_ocr_items(profile, ocr_pages, pages)
+    from nodes.scope import assign_document_scope
+    assign_document_scope(profile, text)          # which structure each clause is about (its headings)
     summary = {
         "name": name,
         "kind": "text" if entry.get("kind") == "text" else "document",
@@ -805,6 +851,8 @@ def _profile_drawing_file(entry: Dict[str, Any], slot: str, label: str, review_f
         "role": entry.get("role", ""),
         "sheets": len(profile.get("sheets") or []),
         "tiles": profile.get("chunk_count", 0),
+        "cut_off_tiles": profile.get("cut_off_tiles", 0),
+        "failed_tiles": profile.get("failed_tiles", 0),
         "requirements": len(profile.get("requirements") or []),
         "quantities": len(profile.get("quantities") or []),
         "warnings": list(profile.get("warnings") or []),
@@ -913,6 +961,14 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
     from fleet import pmap, profile as fleet_profile
     text_jobs = [(slot, idx, entry) for slot in ("a", "b") for idx, entry in enumerate(files[slot])
                  if entry.get("kind") != "drawing"]
+    text_jobs, duplicates = _drop_duplicate_documents(text_jobs)
+    for slot, entry, original in duplicates:
+        summaries[slot].append({
+            "name": entry.get("name") or "document", "kind": "document", "classified_as": entry.get("classified_as", ""),
+            "role": entry.get("role", ""), "chars": 0, "chunks": 0, "total_chunks": 0, "focus_status": "no_focus",
+            "pages": 0, "ocr_pages": 0, "requirements": 0, "quantities": 0, "duplicate_of": original,
+            "warnings": [f"'{entry.get('name')}' has the same content as '{original}' - it was read once."],
+        })
 
     def _profile_job(job):
         slot, idx, entry = job
@@ -994,10 +1050,21 @@ def analyze_documents(state: Dict[str, Any]) -> Dict[str, Any]:
     print("[analyze_documents] === Profiling complete ===\n")
 
     describe = lambda p: f"'{p['label']}' {len(p.get('files') or [])} file(s), {p['chunk_count']} chunk(s)/tile(s)"
-    return {
+    from nodes.assessment import assess_inputs
+    inputs = assess_inputs(profile_a, profile_b)
+    out = {
         "profile_a": profile_a,
         "profile_b": profile_b,
         "documents_analyzed": True,
+        "input_assessment": inputs,
         "analysis_warnings": warnings,
         "step_history": [f"analyze_documents: {describe(profile_a)}; {describe(profile_b)}"],
     }
+    if not inputs["ok"]:
+        # Honest stop: comparing against an empty or unreadable set can only invent "gaps".
+        print(f"[analyze_documents] Not enough to compare - scan stopped. {' '.join(inputs['problems'])}")
+        out.update(discrepancies=[], scan_summary=inputs["headline"], confidence_level="low",
+                   assessment={**inputs, "counts": {"real": 0, "total_raised": 0}, "compared": {"pairs": 0}},
+                   scan_complete=True)
+        out["step_history"] = out["step_history"] + ["conflict_scan: not run - not enough readable content to compare"]
+    return out

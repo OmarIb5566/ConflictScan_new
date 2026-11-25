@@ -20,6 +20,17 @@ def route_input_valid(state: Dict[str, Any]) -> Literal["analyze", "abort"]:
     return "analyze"
 
 
+def route_inputs_sufficient(state: Dict[str, Any]) -> Literal["compare", "insufficient"]:
+    """
+    Compare only when both sets gave something to compare.
+
+    An empty or unreadable set is reported as such (nodes/assessment.py) - the
+    scan does not go looking for discrepancies against nothing.
+    """
+    assessment = state.get("input_assessment") or {}
+    return "compare" if assessment.get("ok", True) else "insufficient"
+
+
 def route_discrepancies(state: Dict[str, Any]) -> Literal["draft_rfi", "no_findings"]:
     """
     Only draft RFIs when the scan actually found something.

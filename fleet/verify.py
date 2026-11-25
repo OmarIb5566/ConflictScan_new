@@ -24,22 +24,30 @@ BATCH = 6
 VERIFY_SYSTEM = """\
 You are an independent senior engineer double-checking discrepancies that a
 colleague reported between construction documents (BOQ, specifications,
-drawings, schedules). For each numbered finding you get what each source says,
-in its own words.
+drawings, schedules). For each numbered finding you get, for each source, the
+file, the sheet or clause heading it comes from, and the exact words or value.
 
-Decide for each one:
-  "confirmed"       - the sources genuinely disagree about the same element at
-                      the same place, and a contractor could not resolve it alone
-  "not_a_conflict"  - wording only, rounding/tolerance, different elements or
-                      places, one side simply more detailed, or the quotes do
-                      not support the claim
-  "unsure"          - the quotes are not enough to tell
+Answer four questions for each finding, from the quoted sources only:
+  same_structure - are both sources about the same structure or facility?
+                   (a pump-station clause and a water-tank drawing are NOT;
+                   two drawings of different tanks are NOT)
+  same_element   - the same element AND the same property of it? (a slab
+                   thickness vs a column size are NOT; bars vs posts are NOT)
+  same_kind      - are the two values the same kind of quantity? (a bare
+                   dimension vs an area, a depth vs a distance, a bar callout
+                   vs a section size are NOT)
+  real_difference- do the values or requirements genuinely differ, beyond
+                   wording, notation, rounding or one side being more detailed?
 
-Be strict: only the quoted words count, not the colleague's summary.
+A finding is a real conflict only if all four are true. If the quotes do not
+let you tell, answer false for that question and say so in the reason.
 
-Return JSON: {"verdicts": [{"index": <n>, "verdict": "confirmed|not_a_conflict|unsure",
+Return JSON: {"verdicts": [{"index": <n>, "same_structure": true|false,
+"same_element": true|false, "same_kind": true|false, "real_difference": true|false,
 "reason": "<one short sentence>"}]}
 """
+
+_CHECKS = ("same_structure", "same_element", "same_kind", "real_difference")
 
 
 def _describe(i: int, d: Dict[str, Any]) -> str:
@@ -48,12 +56,24 @@ def _describe(i: int, d: Dict[str, Any]) -> str:
     evidence = d.get("evidence") or []
     if evidence:
         for e in evidence[:6]:
-            lines.append(f"Source ({e.get('side', '?').upper()}, {e.get('file') or ''} {e.get('reference') or ''}): "
+            where = " | ".join(p for p in (e.get("file") or "", e.get("scope_heading") or "",
+                                           e.get("reference") or "") if p)
+            lines.append(f"Source {e.get('side', '?').upper()} ({where}): "
                          f"\"{(e.get('says') or e.get('quote') or '').strip()[:500]}\"")
     else:
         lines.append(f"Set A says: \"{str(d.get('document_a_says') or '')[:500]}\"")
         lines.append(f"Set B says: \"{str(d.get('document_b_says') or '')[:500]}\"")
     return "\n".join(lines)
+
+
+def _verdict(v: Dict[str, Any]) -> str:
+    answers = [v.get(k) for k in _CHECKS]
+    if any(a is False or str(a).lower() == "false" for a in answers):
+        return "not_a_conflict"
+    if all(a is True or str(a).lower() == "true" for a in answers):
+        return "confirmed"
+    legacy = str(v.get("verdict") or "").lower()          # a model answering in the old form
+    return legacy if legacy in ("confirmed", "not_a_conflict") else "unsure"
 
 
 def _ask(role: str, batch: List[Dict[str, Any]]) -> Dict[int, Dict[str, str]]:
@@ -66,10 +86,8 @@ def _ask(role: str, batch: List[Dict[str, Any]]) -> Dict[int, Dict[str, str]]:
     out = {}
     for v in result.get("verdicts") or []:
         if isinstance(v, dict) and isinstance(v.get("index"), int) and 0 <= v["index"] < len(batch):
-            verdict = str(v.get("verdict") or "unsure").lower()
-            if verdict not in ("confirmed", "not_a_conflict", "unsure"):
-                verdict = "unsure"
-            out[v["index"]] = {"verdict": verdict, "reason": str(v.get("reason") or "")[:300]}
+            out[v["index"]] = {"verdict": _verdict(v), "reason": str(v.get("reason") or "")[:300],
+                               "checks": {k: v.get(k) for k in _CHECKS if k in v}}
     return out
 
 

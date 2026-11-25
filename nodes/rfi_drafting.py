@@ -49,7 +49,7 @@ def _get_llm():
 # ---------------------------------------------------------------------------
 # Tuning
 # ---------------------------------------------------------------------------
-MAX_POINTS_PER_RFI = 8          # beyond this an RFI becomes hard to answer point by point
+MAX_POINTS_PER_RFI = 5          # beyond this an RFI becomes hard to answer point by point
 MAX_POINTS_PER_CALL = 8         # findings drafted per LLM call
 DEFAULT_RESPONSE_DAYS = 7       # working-day allowance quoted on the form
 MAX_ATTACHMENTS_LISTED = 12
@@ -165,11 +165,14 @@ Rules:
   supplied you may mention it in the proposed solution as context ("subject
   to your confirmation"), never as a decision.
 - Never invent drawing numbers, item numbers or values.
+- State each problem at its real size. Do not dramatise a small difference or
+  overstate its cost, programme or safety consequence.
 - Plain text only: no HTML tags (no <br>), no markdown, no bullet symbols.
 - If cost or programme impact cannot be determined from what you were given,
   write "To be assessed on receipt of clarification".
-- Points flagged "verify" rest on OCR-read or partly legible values: start the
-  summary with "It appears that".
+- Write as an engineer citing the documents. NEVER mention OCR, AI, models,
+  reading, legibility, confidence, tiles, items numbers of the input, or how
+  the documents were processed - only what the documents say.
 
 Return a JSON object:
 
@@ -208,7 +211,8 @@ def clean_text(value: Any, max_words: int = 0) -> str:
     tags and markdown emphasis are dropped, whitespace is tidied, and an
     optional word cap trims run-on output at a sentence boundary when possible.
     """
-    text = str(value or "")
+    from nodes.wording import user_text
+    text = user_text(value)          # never how the documents were processed - only what they say
     text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
     text = re.sub(r"<[^>]{1,40}>", "", text)
     text = re.sub(r"[*_`#]{1,3}", "", text)
@@ -554,7 +558,14 @@ def rfi_drafting_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     print("\n[rfi_drafting] === Drafting RFIs ===")
 
-    discrepancies = state.get("discrepancies") or []
+    all_found = state.get("discrepancies") or []
+    # Findings an independent check judged not to be real conflicts are kept for the engineer to
+    # confirm, but are not turned into RFIs automatically (the engineer can still draft one by hand).
+    discrepancies = [d for d in all_found if not d.get("disputed") and not d.get("needs_confirmation")
+                     and not d.get("low_confidence")]
+    if len(discrepancies) < len(all_found):
+        print(f"[rfi_drafting] {len(all_found) - len(discrepancies)} finding(s) left out of the RFIs "
+              f"(doubted by the second check, or resting on a value to be confirmed)")
     if not discrepancies:
         print("[rfi_drafting] No discrepancies - nothing to draft.")
         return {

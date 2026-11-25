@@ -342,6 +342,8 @@ def _file_payload(f):
 def _run_payload(run, project=None, full=True):
     out = {k: v for k, v in run.items() if k not in ("results", "inputs", "review", "progress")}
     out["counts"] = storage.run_counts(run.get("results"), run.get("review"))
+    verdict = (run.get("results") or {}).get("assessment") or {}
+    out["verdict"] = {"key": verdict.get("verdict"), "label": verdict.get("label")} if verdict.get("verdict") else None
     progress = run.get("progress") or {}
     live = jobs.live(run["id"]) if run["status"] in storage.ACTIVE_STATUSES else None
     out["progress"] = live or progress
@@ -1272,5 +1274,8 @@ if __name__ == "__main__":
     print(f"Scan workers:  {jobs.WORKERS} (embedded)")
     print("=" * 80 + "\n")
 
-    debug = os.environ.get("CONFLICTSCAN_DEBUG", "1").lower() not in ("0", "false", "no")
-    app.run(host="0.0.0.0", port=int(os.environ.get("CONFLICTSCAN_PORT", "5000")), debug=debug)
+    # Debug mode (auto-reloader) is opt-in: the reloader restarts the server - and with it every
+    # running scan - whenever a source file changes. Production runs serve.py (waitress).
+    debug = os.environ.get("CONFLICTSCAN_DEBUG", "0").lower() in ("1", "true", "yes")
+    app.run(host="0.0.0.0", port=int(os.environ.get("CONFLICTSCAN_PORT", "5000")), debug=debug,
+            use_reloader=debug)

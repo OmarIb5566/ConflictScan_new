@@ -68,6 +68,7 @@ PAIR_BATCH_SIZE = 12          # candidate pairs per LLM call
 UNMATCHED_BATCH_SIZE = 20     # unmatched requirements per LLM call
 MIN_TOKEN_OVERLAP = 2         # shared keywords needed to call two topics related
 MAX_UNMATCHED_REVIEWED = 120  # cap on omission review, keeps runtime bounded
+MAX_LINKS_PER_ITEM = 2        # checklist links a drawing item may turn into pairs
 MAX_INTERNAL_PAIRS = 48       # per set
 MAX_INTERFACE_CLUSTERS = 16
 MAX_CLUSTER_ITEMS = 24
@@ -201,6 +202,41 @@ def _is_drawing_item(req: Dict[str, Any]) -> bool:
     return req.get("source") in ("vision", "dxf")
 
 
+GATE_STATS: Dict[str, int] = {}
+
+
+def _gate_value(req: Dict[str, Any]) -> Any:
+    """The value to classify: a document clause without a separate value is judged by its own words."""
+    value = req.get("value")
+    if value not in (None, "") or _is_drawing_item(req):
+        return value
+    return req.get("quote") or req.get("statement")
+
+
+def _gate(ra: Dict[str, Any], rb: Dict[str, Any]) -> bool:
+    """
+    Deterministic pre-check (nodes/scope.py) before any model sees a pair:
+    same kind of structure, same facility (drawing numbers), same kind of
+    quantity. Rejections are counted for the scan's diagnostics.
+    """
+    from nodes import scope
+    if not scope.scopes_compatible(scope.item_scopes(ra), scope.item_scopes(rb)):
+        reason = "different structure"
+    elif _is_drawing_item(ra) and _is_drawing_item(rb) and (
+            not scope.codes_compatible(ra.get("codes"), rb.get("codes"))
+            or (ra.get("source_file") != rb.get("source_file") and bool(ra.get("codes")) != bool(rb.get("codes")))):
+        # Two drawing files whose numbers name different facilities - or where only one names a facility
+        # (ST-GAH-1000M3 vs BR-MWU02-200M3) - are not compared; with no codes, shared anchors decide.
+        reason = "different facility"
+    elif not scope.kinds_compatible(_gate_value(ra), _gate_value(rb), str(ra.get("topic") or ""),
+                                    str(rb.get("topic") or "")):
+        reason = "different kind of value"
+    else:
+        return True
+    GATE_STATS[reason] = GATE_STATS.get(reason, 0) + 1
+    return False
+
+
 def _location_label(req: Dict[str, Any]) -> str:
     parts = []
     for key, prefix in (("location", ""), ("section_ref", ""), ("grid", "Grid ")):
@@ -255,6 +291,11 @@ def _evidence(req: Dict[str, Any], label: str) -> Dict[str, Any]:
         "verbatim": bool(quote),
         "summary": _summary(req),
         "low_confidence": bool(req.get("low_confidence") or req.get("legibility") == "partial"),
+        "value_unverified": bool(req.get("value_unverified")),
+        "drawing": _is_drawing_item(req),
+        "value": req.get("value"),
+        "scope_heading": str(req.get("scope_heading") or ""),
+        "sheet": str(req.get("sheet") or ""),
     }
 
 
@@ -311,6 +352,17 @@ Severity guide:
 - minor:    should be tidied up but has no material consequence
 """
 
+# Added to every comparison prompt: the scan is judged on being right, not on how much it raises.
+_HONESTY = """
+Be honest and calibrated:
+- There is NO expected or target number of findings. In well-coordinated documents most statements
+  agree; reporting nothing is a correct, valuable answer and is never a failure.
+- Report a finding only when the quoted words of the sources themselves show it. Do not infer,
+  speculate, or raise "possible" issues to look thorough.
+- Size severity to the real consequence. A small difference is "minor" - do not inflate it.
+- If the material is too thin or unclear to judge, report nothing rather than guess.
+"""
+
 _FINDING_FIELDS = """
       "topic": "<short subject line, naming the element>",
       "issue_class": "<one issue_class key>",
@@ -347,10 +399,14 @@ def _baseline_linked_pairs(
         by_uid = {r.get("uid"): r for r in ref_reqs if r.get("uid")}
         by_id = {item["id"]: item for item in baseline.get("items") or []}
 
+        from nodes import scope
         for req in prof.get("requirements") or []:
             if req.get("legibility") == "unreadable":
                 continue
+            linked = 0
             for bid in req.get("baseline_ids") or []:
+                if linked >= MAX_LINKS_PER_ITEM:
+                    break
                 item = by_id.get(bid)
                 if not item or item.get("source_kind") != "requirement":
                     continue
@@ -360,13 +416,19 @@ def _baseline_linked_pairs(
                     if not isinstance(idx, int) or not 0 <= idx < len(ref_reqs):
                         continue
                     ref_req = ref_reqs[idx]
+                # A checklist id the vision model attached is only a hint: the drawing item must name the
+                # checklist element, and pass the same structure / value-kind gate as any other pair.
+                if not scope.same_element(req, str(item.get("element") or ""), str(item.get("attribute") or "")):
+                    GATE_STATS["checklist link to a different element"] =                         GATE_STATS.get("checklist link to a different element", 0) + 1
+                    continue
                 ra, rb = (ref_req, req) if ref_slot == "a" else (req, ref_req)
-                if (id(ra), id(rb)) in seen or not _locations_compatible(ra, rb):
+                if (id(ra), id(rb)) in seen or not _locations_compatible(ra, rb) or not _gate(ra, rb):
                     continue
                 seen.add((id(ra), id(rb)))
                 pairs.append((ra, rb))
                 used_a.add(id(ra))
                 used_b.add(id(rb))
+                linked += 1
 
     return pairs, used_a, used_b
 
@@ -379,7 +441,7 @@ def _comparable(ra: Dict[str, Any], rb: Dict[str, Any]) -> bool:
     show the same place, and different places legitimately carry different
     values.
     """
-    if not _locations_compatible(ra, rb):
+    if not _locations_compatible(ra, rb) or not _gate(ra, rb):
         return False
     if _is_drawing_item(ra) and _is_drawing_item(rb):
         return _shared_anchor(ra, rb)
@@ -533,7 +595,7 @@ def _describe_extra(prefix: str, req: Dict[str, Any]) -> List[str]:
     if req.get("source_file"):
         lines.append(f"{label}file       : {req['source_file']}")
     if req.get("low_confidence"):
-        lines.append(f"{label}note       : read by OCR / partly legible - treat values with caution")
+        lines.append(f"{label}note       : this value could not be confirmed - treat it with caution")
     return lines
 
 
@@ -565,7 +627,7 @@ def _review_pairs(
     if not pairs:
         return found
 
-    system = _PAIR_SYSTEM + _issue_rules(_PAIR_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
+    system = _PAIR_SYSTEM + _HONESTY + _issue_rules(_PAIR_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
     total_batches = (len(pairs) + PAIR_BATCH_SIZE - 1) // PAIR_BATCH_SIZE
 
     def _one(batch_no):
@@ -688,7 +750,7 @@ def internal_candidates(reqs: List[Dict[str, Any]]) -> List[Tuple[Dict, Dict]]:
                     continue
                 if _norm_value(ra.get("value")) == _norm_value(rb.get("value")):
                     continue
-                if not _locations_compatible(ra, rb):
+                if not _locations_compatible(ra, rb) or not _gate(ra, rb):
                     continue
                 if key.startswith("topic:") and not _shared_anchor(ra, rb):
                     continue      # identical topic but nothing ties them to one place
@@ -707,7 +769,7 @@ def _review_internal(pairs: List[Tuple[Dict, Dict]], label: str, slot: str, revi
     found: List[Dict[str, Any]] = []
     if not pairs:
         return found
-    system = _INTERNAL_SYSTEM + _issue_rules(_INTERNAL_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
+    system = _INTERNAL_SYSTEM + _HONESTY + _issue_rules(_INTERNAL_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
     total_batches = (len(pairs) + PAIR_BATCH_SIZE - 1) // PAIR_BATCH_SIZE
     def _one(batch_no):
         part: List[Dict[str, Any]] = []
@@ -836,8 +898,9 @@ def interface_clusters(reqs: List[Dict[str, Any]], drawing_pairs: bool = False) 
     for r in reqs:
         if r.get("legibility") == "unreadable":
             continue
+        facility = "/".join(sorted(r.get("codes") or []))
         for key in _anchor_keys(r):
-            clusters.setdefault(key, []).append(r)
+            clusters.setdefault(f"{key}@{facility}" if facility else key, []).append(r)
 
     out = []
     for key, members in clusters.items():
@@ -892,7 +955,7 @@ def sheet_pair_clusters(profile_a: Dict[str, Any], profile_b: Dict[str, Any], li
 def _review_interfaces(clusters: List[Dict[str, Any]], labels: Dict[str, str], review_focus: str,
                        drawing_mode: bool) -> List[Dict[str, Any]]:
     found: List[Dict[str, Any]] = []
-    system = _INTERFACE_SYSTEM + _issue_rules(_INTERFACE_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
+    system = _INTERFACE_SYSTEM + _HONESTY + _issue_rules(_INTERFACE_CLASSES) + (_DRAWING_RULES if drawing_mode else "")
     def _one(args):
         part: List[Dict[str, Any]] = []
         n, cluster = args
@@ -1005,7 +1068,7 @@ def _review_unmatched(
     if not items:
         return found
 
-    system = _COVERAGE_SYSTEM + _issue_rules(_COVERAGE_CLASSES) + (
+    system = _COVERAGE_SYSTEM + _HONESTY + _issue_rules(_COVERAGE_CLASSES) + (
         _DRAWING_RULES + _DRAWING_COVERAGE_RULE if drawing_mode else "")
     items = sorted(items, key=lambda r: 0 if r.get("open_item") else 1)[:MAX_UNMATCHED_REVIEWED]
     total_batches = (len(items) + UNMATCHED_BATCH_SIZE - 1) // UNMATCHED_BATCH_SIZE
@@ -1201,6 +1264,7 @@ def _compact_refs(value: Any) -> str:
 
 def _normalise(disc: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce a raw discrepancy dict into the state.Discrepancy shape, with taxonomy defaults."""
+    from nodes.wording import user_text
     text = f"{disc.get('topic') or ''} {disc.get('description') or ''}"
     issue = normalise_issue_class(disc.get("issue_class")) or best_issue_class(text, "doc_value_conflict")
 
@@ -1226,17 +1290,27 @@ def _normalise(disc: Dict[str, Any]) -> Dict[str, Any]:
         "discipline": str(disc.get("discipline") or "general").strip().lower(),
         "location": str(disc.get("location") or "").strip(),
         "element": str(disc.get("element") or "").strip(),
-        "description": str(disc.get("description") or "").strip(),
+        "description": user_text(disc.get("description")),
         "document_a_says": str(disc.get("document_a_says") or "").strip(),
         "document_b_says": str(disc.get("document_b_says") or "").strip(),
         "document_a_reference": _compact_refs(disc.get("document_a_reference")),
         "document_b_reference": _compact_refs(disc.get("document_b_reference")),
         "evidence": evidence,
         "low_confidence": low_confidence,
+        "needs_confirmation": bool(disc.get("needs_confirmation")),
         "interpretive": bool(disc.get("interpretive")),
-        "impact": str(disc.get("impact") or "").strip(),
-        "suggested_question": str(disc.get("suggested_question") or "").strip(),
+        "impact": user_text(disc.get("impact")),
+        "suggested_question": user_text(disc.get("suggested_question")),
     }
+
+
+def _bare_drawing_number(e: Dict[str, Any]) -> bool:
+    """'0.2300', '800', '40.0' on a drawing: a number whose meaning only the vision model inferred."""
+    if not e.get("drawing"):
+        return False
+    from nodes.scope import value_kinds
+    value = e.get("value") if e.get("value") not in (None, "") else e.get("says")
+    return value_kinds(value) == {"number"}
 
 
 def _calibrate(disc: Dict[str, Any]) -> Dict[str, Any]:
@@ -1249,6 +1323,12 @@ def _calibrate(disc: Dict[str, Any]) -> Dict[str, Any]:
     """
     if disc["low_confidence"] and disc["severity"] == "critical":
         disc["severity"] = "major"
+    # A value the sheet's own text does not carry may be misread, and a bare number on a drawing (no unit,
+    # no label) only means what the reader guessed it measures: either can prompt a check, not drive a conflict.
+    if any(e.get("value_unverified") or _bare_drawing_number(e) for e in disc["evidence"]):
+        disc["severity"] = "minor"
+        disc["needs_confirmation"] = True
+        disc["low_confidence"] = True
     if disc["type"] == "ambiguity" and disc["severity"] == "critical":
         disc["severity"] = "major"
     if disc["issue_class"] == "spec_ambiguity" and disc["severity"] == "critical":
@@ -1311,6 +1391,58 @@ def _merge_into(keep: Dict[str, Any], other: Dict[str, Any]) -> None:
     keep["low_confidence"] = keep["low_confidence"] and other["low_confidence"]
 
 
+MAX_EVIDENCE_PER_FINDING = 12
+
+
+def _clause_key(disc: Dict[str, Any]) -> str:
+    """One requirement of one set, checked against the other set's statements of the same kind."""
+    from nodes.scope import value_kinds
+    if disc.get("scope", "between") != "between":
+        return ""
+    evidence = [e for e in disc["evidence"] if e.get("side") in ("a", "b")]
+    # The clause is the document side (a drawing item is the "place" it is checked at); with two
+    # documents or two drawings, set B's statement is the reference.
+    docs = [e for e in evidence if not e.get("drawing")]
+    clause = next((e for e in docs if e.get("side") == "b"), None) or (docs[0] if docs else None) \
+        or next((e for e in evidence if e.get("side") == "b"), None)
+    other = next((e for e in evidence if clause and e.get("side") != clause.get("side")), None)
+    if not clause or not other:
+        return ""
+    kinds = ",".join(sorted(value_kinds(other.get("says"))))
+    text = re.sub(r"\s+", " ", str(clause.get("says") or "").lower())[:300]
+    return f"{clause['side']}|{text}|{disc['issue_class']}|{kinds}|{disc.get('needs_confirmation', False)}"
+
+
+def _group_by_clause(found: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    The same requirement found to differ at many places is ONE issue: e.g. a
+    column clause against every column detail. Merged into one finding that
+    lists every location (evidence capped), so the register and the RFIs carry
+    one item per issue.
+    """
+    groups: Dict[str, Dict[str, Any]] = {}
+    out: List[Dict[str, Any]] = []
+    for disc in found:
+        key = _clause_key(disc)
+        if not key:
+            out.append(disc)
+            continue
+        keep = groups.get(key)
+        if keep is None:
+            groups[key] = disc
+            disc["locations"] = 1
+            out.append(disc)
+            continue
+        keep["locations"] = keep.get("locations", 1) + 1
+        _merge_into(keep, disc)
+    for disc in out:
+        if disc.get("locations", 1) > 1:
+            disc["evidence"] = disc["evidence"][:MAX_EVIDENCE_PER_FINDING]
+            disc["description"] = (f"{disc['description']} The same difference appears at "
+                                   f"{disc['locations']} places on the drawings.").strip()
+    return out
+
+
 def _dedupe_and_rank(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalise, calibrate, merge near-duplicates, sort by severity, assign D-nnn ids."""
     exact: Dict[str, Dict[str, Any]] = {}
@@ -1331,6 +1463,7 @@ def _dedupe_and_rank(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             _merge_into(target, disc)
         else:
             merged.append(disc)
+    merged = _group_by_clause(merged)
 
     ordered = sorted(
         merged,
@@ -1392,7 +1525,7 @@ def _build_summary(
     class_str = ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(by_class.items(), key=lambda kv: -kv[1]))
     within_str = f" {within} of them are inconsistencies within one set." if within else ""
     low = sum(1 for d in discrepancies if d.get("low_confidence"))
-    low_str = f" {low} rest on OCR-read or partly legible values and need verification." if low else ""
+    low_str = f" {low} rest on values to be confirmed on the documents." if low else ""
     return (
         f"{len(discrepancies)} discrepancies between '{label_a}' ({files_a} file(s)) and '{label_b}' "
         f"({files_b} file(s)): {counts['critical']} critical, {counts['major']} major, {counts['minor']} minor. "
@@ -1464,6 +1597,12 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     readable_a = [r for r in reqs_a if r.get("legibility") != "unreadable"]
     readable_b = [r for r in reqs_b if r.get("legibility") != "unreadable"]
 
+    # 0. Scope of every statement (structure, facility) for the deterministic pair gate
+    from nodes import scope
+    for prof in (profile_a, profile_b):
+        scope.annotate_drawing_items(prof)
+    GATE_STATS.clear()
+
     # 1. Alignment - baseline links first, location-gated keyword overlap for the rest
     linked, used_a, used_b = _baseline_linked_pairs(profile_a, profile_b)
     keyword_pairs, unmatched_a, unmatched_b = align_requirements(
@@ -1474,6 +1613,8 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     if meaning_pairs:
         print(f"[conflict_scan] {len(meaning_pairs)} more pair(s) matched by meaning")
     pairs = linked + keyword_pairs + meaning_pairs
+    if GATE_STATS:
+        print(f"[conflict_scan] pairs ruled out before review: {dict(GATE_STATS)}")
     print(
         f"[conflict_scan] Aligned {len(pairs)} candidate pair(s) ({len(linked)} via baseline links); "
         f"{len(unmatched_a)} unmatched in '{label_a}', {len(unmatched_b)} in '{label_b}'"
@@ -1514,6 +1655,24 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     # the contents of a drawing package. Items of the much larger set are
     # therefore not reviewed as omissions from the much smaller one (open items
     # the larger set itself leaves unresolved are still reviewed).
+    # Little in common (almost nothing could be paired): a statement found in one set only is then
+    # not evidence of a gap in the other - only what the documents themselves leave open is reviewed.
+    from nodes.assessment import little_in_common
+    limitations: List[str] = []
+    overlap_low = little_in_common(len(pairs), len(readable_a), len(readable_b))
+    if overlap_low and (unmatched_a or unmatched_b):
+        limitations.append(
+            f"The two sets share little subject matter (only {len(pairs)} statement(s) could be paired), so "
+            f"statements found in one set only were not reported as gaps in the other."
+        )
+        unmatched_a = [r for r in unmatched_a if r.get("open_item") is True]
+        unmatched_b = [r for r in unmatched_b if r.get("open_item") is True]
+    for slot, unmatched in (("a", unmatched_a), ("b", unmatched_b)):
+        if len(unmatched) > MAX_UNMATCHED_REVIEWED:
+            limitations.append(
+                f"{len(unmatched)} statements of '{labels[slot]}' have no counterpart; only the first "
+                f"{MAX_UNMATCHED_REVIEWED} (open items first) were reviewed for gaps."
+            )
     unmatched_ids = {id(r) for r in unmatched_a + unmatched_b}
     open_a = [r for r in readable_a if r.get("open_item") is True and id(r) not in unmatched_ids]
     open_b = [r for r in readable_b if r.get("open_item") is True and id(r) not in unmatched_ids]
@@ -1570,14 +1729,22 @@ def conflict_scan_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             f"An independent check judged {vstats['disputed']} finding(s) not to be real conflicts. They are kept and "
             f"marked 'second opinion: not a conflict' so you can decide."
         )
-    summary = _build_summary(discrepancies, profile_a, profile_b)
+    from nodes.assessment import assess_scan
+    assessment = assess_scan(
+        discrepancies, profile_a, profile_b,
+        {"pairs": len(pairs), "internal_pairs": internal_counts.get("a", 0) + internal_counts.get("b", 0),
+         "interface_clusters": len(clusters)},
+        state.get("input_assessment") or {}, limitations)
+    summary = assessment["headline"] + " " + _build_summary(discrepancies, profile_a, profile_b)
     confidence = _confidence(profile_a, profile_b)
+    print(f"[conflict_scan] Verdict: {assessment['label']} - {assessment['headline']}")
 
     print(f"[conflict_scan] {summary}")
     print("[conflict_scan] === Scan complete ===\n")
 
     return {
         "discrepancies": discrepancies,
+        "assessment": assessment,
         "scan_summary": summary,
         "confidence_level": confidence,
         "scan_complete": True,

@@ -35,6 +35,77 @@ def ollama_options(temperature: float, **extra) -> dict:
     return {"temperature": temperature, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX, **extra}
 
 
+def _dedupe(value, counter):
+    """Remove repeated elements from every list (a looping model repeats list entries verbatim)."""
+    if isinstance(value, dict):
+        return {k: _dedupe(v, counter) for k, v in value.items()}
+    if isinstance(value, list):
+        out, seen = [], set()
+        for v in value:
+            sig = json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
+            if sig in seen:
+                counter[0] += 1
+                continue
+            seen.add(sig)
+            out.append(_dedupe(v, counter))
+        return out
+    return value
+
+
+def salvage_truncated_json(text: str):
+    """
+    A JSON object cut off part-way (output cap, or stopped because it was looping):
+    keep everything up to the last complete value, close the open brackets, and
+    drop repeated list entries. Returns the object with "_truncated": True and
+    "_repeated": n, or None when nothing usable can be recovered.
+    """
+    text = text or ""
+    start = text.find("{")
+    if start < 0:
+        return None
+    stack, in_str, esc = [], False, False
+    cuts = []                       # (position just before a ',', closers needed there)
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack:
+                break
+            stack.pop()
+            if not stack:
+                return None         # the object closed - not a truncation, leave it to the normal parser
+            cuts.append((i + 1, "".join(reversed(stack))))
+        elif ch == ",":
+            cuts.append((i, "".join(reversed(stack))))
+    # Prefer a cut between whole elements of the top object or its lists, so a
+    # half-written item is dropped rather than kept with missing fields.
+    shallow = [c for c in cuts if len(c[1]) <= 2]
+    for pos, closers in list(reversed(shallow[-200:])) + list(reversed(cuts[-50:])):
+        try:
+            value = json.loads(text[start:pos] + closers)
+        except ValueError:
+            continue
+        if not isinstance(value, dict) or not value:
+            return None
+        counter = [0]
+        value = _dedupe(value, counter)
+        value["_truncated"] = True
+        value["_repeated"] = counter[0]
+        return value
+    return None
+
+
 class OllamaLLM:
     def __init__(self, model: str = MODEL_NAME, url: str = OLLAMA_URL):
         self.model = model
@@ -135,6 +206,13 @@ class OllamaLLM:
                                 return json.loads(json_str)
                             except:
                                 pass
+
+        # A reply cut off at the output cap (often a model stuck repeating an
+        # item): keep every complete element of its opening list instead of
+        # throwing the whole reply away. Marked so callers can report it.
+        salvaged = salvage_truncated_json(text)
+        if salvaged is not None:
+            return salvaged
 
         # Last resort: an empty object. Callers read the keys they expect with
         # .get() and fall back on their own, so an empty dict degrades cleanly

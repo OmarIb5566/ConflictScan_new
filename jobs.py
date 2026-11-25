@@ -180,7 +180,7 @@ def cancel(run_id: str) -> bool:
         return True
     if job:
         storage.request_job_cancel(job["id"])
-        _log(run_id, "Cancel requested - stopping after the current stage...")
+        _log(run_id, "Cancel requested - stopping after the model call in progress...")
         return True
     # No job behind it (e.g. lost in a crash before the queue existed): just close it.
     storage.update_run(run_id, status="cancelled", finished_at=storage.now(), error="Cancelled.")
@@ -260,6 +260,24 @@ def _move_into(path: Optional[str], dest_dir: str) -> Optional[str]:
     return name
 
 
+def coverage_notes(result_state: Dict[str, Any], *sets: Dict[str, Any]) -> List[str]:
+    """
+    The few things an engineer needs to know about what the scan could cover, in
+    plain words. The detailed diagnostics ('warnings') stay for administrators.
+    """
+    notes = []
+    for doc in sets:
+        for f in (doc or {}).get("files") or []:
+            if f.get("duplicate_of"):
+                notes.append(f"'{f['name']}' has the same content as '{f['duplicate_of']}', so it was read once.")
+    findings = result_state.get("discrepancies") or []
+    to_confirm = sum(1 for d in findings if d.get("low_confidence") and not d.get("disputed"))
+    if to_confirm:
+        notes.append(f"{to_confirm} finding(s) rest on drawing values that could not be confirmed from the drawing "
+                     f"text. They are marked “to confirm” and were not turned into RFIs.")
+    return notes
+
+
 def build_results(result_state: Dict[str, Any], files_a: list, files_b: list, export_dir: str) -> Dict[str, Any]:
     from nodes.rfi_knowledge import issue_classes
 
@@ -270,11 +288,14 @@ def build_results(result_state: Dict[str, Any], files_a: list, files_b: list, ex
         rfi.setdefault("status", "draft")
         rfi_items.append(rfi)
 
+    doc_a, doc_b = set_summary(result_state, "a", files_a), set_summary(result_state, "b", files_b)
     return {
         "project_name": result_state.get("project_name"),
-        "document_a": set_summary(result_state, "a", files_a),
-        "document_b": set_summary(result_state, "b", files_b),
+        "document_a": doc_a,
+        "document_b": doc_b,
+        "coverage_notes": coverage_notes(result_state, doc_a, doc_b),
         "scan_summary": result_state.get("scan_summary", ""),
+        "assessment": result_state.get("assessment"),
         "confidence_level": result_state.get("confidence_level", "medium"),
         "warnings": result_state.get("analysis_warnings", []),
         "discrepancies": result_state.get("discrepancies", []),
@@ -364,12 +385,16 @@ def _execute_scan(job: Dict[str, Any]) -> None:
     run = storage.get_run(run_id)
     if not run or run["status"] not in ("queued", "running") or job.get("cancel_requested"):
         storage.finish_job(job["id"], "cancelled")
+        if run and run["status"] in ("queued", "running"):
+            storage.update_run(run_id, status="cancelled", finished_at=storage.now(), error="Cancelled by the user.")
         return
 
     project = storage.get_project(run["project_id"]) or {}
     creator = storage.get_user(run["created_by"]) if run.get("created_by") else None
     inputs = run.get("inputs") or {}
     should_stop = _cancel_checker(job["id"])
+    from fleet import client as fleet_client
+    cancel_token = fleet_client.cancel_check.set(should_stop)
 
     with _live_lock:
         _live[run_id] = {**_new_progress(), "log": deque(maxlen=LOG_LINES_KEPT), "started_at": storage.now(),
@@ -386,8 +411,11 @@ def _execute_scan(job: Dict[str, Any]) -> None:
     try:
         from graph import run_conflict_scan
 
+        checkpoints = storage.run_dir(run_id, "checkpoints")
         if job["attempts"] > 1:
             _log(run_id, f"Attempt {job['attempts']} of {job['max_attempts']}")
+        else:
+            shutil.rmtree(checkpoints, ignore_errors=True)   # a new scan starts fresh; only a retry resumes
         files_a, files_b = resolve_source_files(run_id, work_dir, inputs)
         if not files_a or not files_b:
             missing = " and ".join(s for s, f in (("Set A", files_a), ("Set B", files_b)) if not f)
@@ -398,7 +426,12 @@ def _execute_scan(job: Dict[str, Any]) -> None:
 
         def on_node_complete(node: str, delta: Dict[str, Any]) -> None:
             _set_stage(run_id, node, "done")
-            if node == "conflict_scan" and not (delta.get("discrepancies") or []):
+            if node == "analyze_documents" and (delta.get("input_assessment") or {}).get("ok") is False:
+                _set_stage(run_id, "conflict_scan", "skipped")
+                _set_stage(run_id, "draft_rfi", "skipped")
+                _log(run_id, "Not enough readable content to compare - the scan stops here (see the summary).")
+                nxt = "export"
+            elif node == "conflict_scan" and not (delta.get("discrepancies") or []):
                 _set_stage(run_id, "draft_rfi", "skipped")
                 nxt = "export"
             else:
@@ -426,6 +459,7 @@ def _execute_scan(job: Dict[str, Any]) -> None:
             on_node_complete=on_node_complete,
             should_stop=should_stop,
             output_dir=os.path.join(work_dir, "out"),
+            checkpoint_dir=checkpoints,
             debug_dir=storage.run_dir(run_id, "debug") if DEBUG_LOGS else None,
             **_scan_extras(run, project),
         )
@@ -443,7 +477,7 @@ def _execute_scan(job: Dict[str, Any]) -> None:
         _after_scan(run_id, "complete")
 
     except Exception as exc:  # noqa: BLE001 - every failure must land on the run record
-        cancelled = type(exc).__name__ == "ScanCancelled"
+        cancelled = type(exc).__name__ == "ScanCancelled" or should_stop()
         retry = (not cancelled and _is_transient(exc) and job["attempts"] < job["max_attempts"])
         if not cancelled:
             traceback.print_exc()
@@ -471,6 +505,7 @@ def _execute_scan(job: Dict[str, Any]) -> None:
     finally:
         _current_run.reset(token)
         fleet_run.reset(fleet_token)
+        fleet_client.cancel_check.reset(cancel_token)
         shutil.rmtree(work_dir, ignore_errors=True)
         with _live_lock:
             _live.pop(run_id, None)
@@ -655,7 +690,14 @@ def recover_stale_jobs() -> int:
     """Jobs whose worker stopped sending heartbeats: back to the queue, or failed when out of attempts."""
     n = 0
     for job in storage.stale_running_jobs(STALE_SECONDS):
-        if job["attempts"] >= job["max_attempts"]:
+        if job.get("cancel_requested"):
+            storage.finish_job(job["id"], "cancelled")
+            if job["kind"] == "scan":
+                run = storage.get_run(job["target_id"])
+                if run and run["status"] in storage.ACTIVE_STATUSES:
+                    storage.update_run(job["target_id"], status="cancelled", finished_at=storage.now(),
+                                       error="Cancelled by the user.")
+        elif job["attempts"] >= job["max_attempts"]:
             storage.finish_job(job["id"], "failed", error="The worker running this job stopped.")
             if job["kind"] == "scan":
                 storage.update_run(job["target_id"], status="failed", finished_at=storage.now(),

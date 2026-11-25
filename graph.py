@@ -39,8 +39,9 @@ from nodes.conflict_scan import conflict_scan_agent
 from nodes.rfi_drafting import rfi_drafting_agent
 from nodes.export import export_discrepancy_register
 from nodes.run_paths import scan_dirs
+from nodes.checkpoint import checkpointed
 
-from edges import route_input_valid, route_discrepancies
+from edges import route_input_valid, route_inputs_sufficient, route_discrepancies
 
 
 def create_conflict_scan_graph() -> StateGraph:
@@ -48,8 +49,9 @@ def create_conflict_scan_graph() -> StateGraph:
     workflow = StateGraph(ConflictScanState)
 
     workflow.add_node("receive_input", receive_input)
-    workflow.add_node("analyze_documents", analyze_documents)
-    workflow.add_node("conflict_scan", conflict_scan_agent)
+    # The two long stages resume from a checkpoint when the same scan is restarted.
+    workflow.add_node("analyze_documents", checkpointed("analyze_documents", analyze_documents))
+    workflow.add_node("conflict_scan", checkpointed("conflict_scan", conflict_scan_agent))
     workflow.add_node("draft_rfi", rfi_drafting_agent)
     workflow.add_node("export", export_discrepancy_register)
 
@@ -64,7 +66,14 @@ def create_conflict_scan_graph() -> StateGraph:
         },
     )
 
-    workflow.add_edge("analyze_documents", "conflict_scan")
+    workflow.add_conditional_edges(
+        "analyze_documents",
+        route_inputs_sufficient,
+        {
+            "compare": "conflict_scan",
+            "insufficient": "export",
+        },
+    )
 
     workflow.add_conditional_edges(
         "conflict_scan",
@@ -110,6 +119,7 @@ def run_conflict_scan(
     on_node_complete: Callable[[str, Dict[str, Any]], None] = None,
     should_stop: Callable[[], bool] = None,
     output_dir: str = None,
+    checkpoint_dir: str = None,
     debug_dir: str = None,
 ) -> Dict[str, Any]:
     """
@@ -171,7 +181,7 @@ def run_conflict_scan(
     if review_focus:
         print(f"   Focus: {review_focus}")
 
-    with scan_dirs(output_dir=output_dir, debug_dir=debug_dir):
+    with scan_dirs(output_dir=output_dir, debug_dir=debug_dir, checkpoint_dir=checkpoint_dir):
         if on_node_complete is None and should_stop is None:
             return conflict_scan_graph.invoke(initial_state)
 

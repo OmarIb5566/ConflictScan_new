@@ -1110,3 +1110,16 @@ mark { background: #ffe58a; color: #222; }
 [dir=rtl] .help-sec ol { padding-left: 0; padding-right: 20px; }
 [dir=rtl] tr.overdue td:first-child { box-shadow: inset -3px 0 0 var(--danger); }
 [dir=rtl] .says, [dir=rtl] textarea, [dir=rtl] .prev-val { unicode-bidi: plaintext; }
+
+/* ------------------------------------------------------------ honest verdict */
+.verdict { border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; border: 1px solid var(--border); border-inline-start-width: 5px; background: var(--surface); }
+.verdict .v-label { font: 700 12px 'Inter', 'Segoe UI', system-ui, sans-serif; text-transform: uppercase; letter-spacing: .4px; }
+.verdict .v-head { margin: 4px 0 0; font-size: 14.5px; line-height: 1.45; }
+.verdict .v-facts { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.verdict .verdict-lim { margin-top: 8px; font-size: 12.5px; }
+.verdict .verdict-lim ul { margin: 6px 0 0; padding-left: 18px; }
+.verdict.ok { border-inline-start-color: var(--ok); } .verdict.ok .v-label { color: var(--ok); }
+.verdict.bad { border-inline-start-color: var(--danger); } .verdict.bad .v-label { color: var(--danger); }
+.verdict.warn { border-inline-start-color: var(--warn); background: var(--warn-soft); } .verdict.warn .v-label { color: var(--warn); }
+.verdict.compact { padding: 10px 14px; }
+.verdict.compact .v-head { font-size: 13.5px; }

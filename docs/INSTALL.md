@@ -130,9 +130,30 @@ scheduled tasks at start-up):
 
 ```powershell
 # GPU 0
-$env:CUDA_VISIBLE_DEVICES="0"; $env:OLLAMA_HOST="127.0.0.1:11434"; $env:OLLAMA_NUM_PARALLEL="4"; $env:OLLAMA_MAX_LOADED_MODELS="4"; ollama serve
+$env:CUDA_VISIBLE_DEVICES="0"; $env:OLLAMA_HOST="127.0.0.1:11434"; $env:OLLAMA_NUM_PARALLEL="4"; $env:OLLAMA_FLASH_ATTENTION="1"; $env:OLLAMA_MAX_LOADED_MODELS="4"; ollama serve
 # GPU 1 -> 11435, GPU 2 -> 11436, GPU 3 -> 11437
 ```
+
+> **`OLLAMA_NUM_PARALLEL` is required, not optional.** Without it Ollama serves
+> one request at a time, and the app's parallel requests just queue. Measured on
+> an RTX 4090: 4 requests in flight give 2.5–2.8× the throughput of 1 for both
+> the vision model (qwen2.5vl:7b) and the 27B comparison model. Set it to at
+> least the profile's `parallel` value (`config/fleet.toml`).
+>
+> On a single workstation running the Ollama tray app, set it once as a user
+> environment variable and restart Ollama:
+> `[Environment]::SetEnvironmentVariable('OLLAMA_NUM_PARALLEL','4','User')` and
+> `[Environment]::SetEnvironmentVariable('OLLAMA_FLASH_ATTENTION','1','User')`.
+
+**NVIDIA L40 / L40S hosts (48 GB per card):** use the `a100` profile
+(`default_profile = "a100"` in `config/fleet.toml`, or `CONFLICTSCAN_FLEET_PROFILE=a100`).
+48 GB holds the vision, comparison and verification models at once, so they stay
+loaded instead of being swapped between stages. Per-card speed is close to an
+RTX 4090; with several cards, run one Ollama instance per card as above.
+
+Run the web app with **`serve.py`** (waitress) in production. `python api.py` is
+the development server; with `CONFLICTSCAN_DEBUG=1` it reloads on every code
+change, which restarts running scans.
 
 Pull the models once on each instance that will serve them:
 

@@ -194,6 +194,8 @@ class ConflictScanState(TypedDict):
     # --- Cross-document conflict scan -------------------------------------
     discrepancies: Annotated[List[Discrepancy], add_to_list]
     scan_summary: Annotated[str, LastValue]
+    input_assessment: Optional[Dict[str, Any]]      # enough in both sets to compare? (nodes/assessment.py)
+    assessment: Optional[Dict[str, Any]]            # the honest verdict of the scan (nodes/assessment.py)
     confidence_level: Optional[str]                 # high | medium | low
     analysis_warnings: Annotated[List[str], add_to_list]
     scan_complete: Optional[bool]

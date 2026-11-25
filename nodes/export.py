@@ -36,7 +36,7 @@ REGISTER_COLUMNS = [
     ("document_b_says", "{label_b} states"),
     ("document_b_reference", "{label_b} reference"),
     ("evidence", "All sources quoted"),
-    ("low_confidence", "Verify (OCR / partly legible)"),
+    ("low_confidence", "To confirm on the document"),
     ("impact", "Impact"),
     ("suggested_question", "Clarification sought"),
 ]

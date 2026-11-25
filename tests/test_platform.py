@@ -464,3 +464,70 @@ def test_offline_sql_for_the_dba():
                         ("mssql+pyodbc://x/y?driver=ODBC", "NVARCHAR(80)")):
         out = _manage(["sql", "--url", url], {}).stdout
         assert expect in out and "CREATE TABLE conflictscan.runs" in out
+
+
+# ---------------------------------------------------------------------------
+# Cancelling
+# ---------------------------------------------------------------------------
+
+def test_cancel_stops_a_long_stage_at_the_next_model_call(monkeypatch):
+    """A cancel during a long stage takes effect before the next model call, not after the stage."""
+    from fleet import client as fc
+    calls = {"n": 0}
+
+    def slow_post(server, payload, timeout=900):
+        calls["n"] += 1
+        time.sleep(0.05)
+        return {"content": "{}", "prompt_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(fc, "_post", slow_post)
+    monkeypatch.setattr(fc, "resolve", lambda role: [("m", {"name": "s", "url": "http://x"})])
+
+    def long_stage(**kwargs):
+        kwargs["on_node_complete"]("receive_input", {})
+        for i in range(400):                 # one long "read & profile" stage
+            try:
+                fc.call("extractor", "s", f"chunk {i} {time.time()}", cache=False)
+            except Exception as exc:          # nodes swallow errors per chunk - the cancel must still win
+                if type(exc).__name__ != "ScanCancelled":
+                    raise
+        raise AssertionError("the stage was not stopped")
+
+    monkeypatch.setattr(graph, "run_conflict_scan", long_stage)
+    c = client_for("canceller")
+    _project_id, run_id = new_scanned_run(c, "Cancel mid-stage")
+    deadline = time.time() + 10
+    while c.get(f"/api/runs/{run_id}/progress").get_json()["status"] != "running" and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)
+    started = time.time()
+    assert c.post(f"/api/runs/{run_id}/cancel").status_code == 200
+    run = wait_for(c, run_id, timeout=10)
+    assert run["status"] == "cancelled" and run["error"] == "Cancelled by the user."
+    assert time.time() - started < 5 and calls["n"] < 400
+
+
+def test_restart_never_revives_a_cancelled_scan():
+    from sqlalchemy import update
+    c = client_for("canceller2")
+    run_id = c.post("/api/projects", json={"name": "Dead worker"}).get_json()["run"]["id"]
+    storage.update_run(run_id, status="running")
+    job = storage.enqueue_job("scan", run_id, max_attempts=3)
+    storage.claim_job(["scan"], "dead-host:1")
+    storage.request_job_cancel(job["id"])
+    with storage.tx() as conn:            # the app was shut down: no heartbeat since
+        conn.execute(update(storage.jobs).where(storage.jobs.c.id == job["id"]).values(heartbeat_at=storage.ago(hours=12)))
+    jobs.recover_stale_jobs()
+    assert storage.get_job(job["id"])["status"] == "cancelled"
+    assert storage.get_run(run_id)["status"] == "cancelled"
+
+
+def test_claimed_cancelled_job_closes_its_run():
+    c = client_for("canceller3")
+    run_id = c.post("/api/projects", json={"name": "Claimed after cancel"}).get_json()["run"]["id"]
+    storage.update_run(run_id, status="queued")
+    job = storage.enqueue_job("scan", run_id)
+    storage.request_job_cancel(job["id"])
+    jobs._execute_scan(storage.get_job(job["id"]))
+    assert storage.get_job(job["id"])["status"] == "cancelled"
+    assert storage.get_run(run_id)["status"] == "cancelled"

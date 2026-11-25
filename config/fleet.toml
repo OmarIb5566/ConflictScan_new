@@ -55,7 +55,10 @@ embedder         = { model = "bge-m3:latest" }
 # ---------------------------------------------------------------------------
 [profiles.workstation]
 mode = "staged"
-parallel = 2                 # requests in flight per role (set OLLAMA_NUM_PARALLEL >= this)
+# Requests in flight per role. Ollama must be started with OLLAMA_NUM_PARALLEL >= this
+# (and OLLAMA_FLASH_ATTENTION=1), otherwise it serves one request at a time and the
+# extra requests only queue. Measured on the RTX 4090: 4 in flight = 2.5-2.8x throughput.
+parallel = 4
 verify_findings = true
 semantic_matching = true
 rfi_memory = true
@@ -64,14 +67,14 @@ vote_critical = false
 
 [profiles.workstation.roles]
 page_triage      = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
-ocr              = { model = "qwen2.5vl:7b", fallback = ["glm-ocr:latest"], parallel = 2 }
+ocr              = { model = "qwen2.5vl:7b", fallback = ["glm-ocr:latest"] }
 drawing_overview = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
 drawing_reader   = { model = "qwen2.5vl:7b", fallback = ["gemma4:e4b"] }
 drawing_second   = { model = "gemma4:e4b" }
 extractor        = { model = "qwen3:14b", fallback = ["gemma4:e4b"], think = false }
-adjudicator      = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false, parallel = 1 }
-verifier         = { model = "gpt-oss:latest", fallback = ["qwen3:14b"], parallel = 1 }
-drafter          = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false, parallel = 1 }
+adjudicator      = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false }
+verifier         = { model = "gpt-oss:latest", fallback = ["qwen3:14b"] }
+drafter          = { model = "qwen3.6:27b", fallback = ["qwen3:14b", "gemma4:e4b"], think = false }
 embedder         = { model = "bge-m3:latest", parallel = 4 }
 
 # ---------------------------------------------------------------------------

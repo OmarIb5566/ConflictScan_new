@@ -82,8 +82,11 @@ def _after_scan(run_id: str, outcome: str) -> None:
     starters = {run.get("created_by"), run.get("updated_by"), job.get("created_by")}
     counts = storage.run_counts(run.get("results"), run.get("review"))
     if outcome == "complete":
-        notify(starters, "scan_done", f"Scan finished: {project.get('name')} Rev {run['seq']}",
-               f"{counts['findings']} finding(s), {counts['rfis']} RFI(s)", f"#/run/{run_id}/findings", project.get("id"))
+        verdict = (run.get("results") or {}).get("assessment") or {}
+        title = f"Scan finished: {project.get('name')} Rev {run['seq']}" + (f" - {verdict['label']}" if verdict.get("label") else "")
+        body = verdict.get("headline") or f"{counts['findings']} finding(s), {counts['rfis']} RFI(s)"
+        notify(starters, "scan_done", title, body,
+               f"#/run/{run_id}/{'scan' if verdict.get('verdict') == 'insufficient_input' else 'findings'}", project.get("id"))
     elif outcome == "failed":
         notify(starters, "scan_failed", f"Scan failed: {project.get('name')} Rev {run['seq']}",
                (run.get("error") or "")[:300], f"#/run/{run_id}/scan", project.get("id"))
