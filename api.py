@@ -858,6 +858,9 @@ def finding_review(run_id, disc_id):
         return {"review": review}
 
     mutate_run(run_id, change, request.user["id"])
+    if {"status", "severity", "note"} & set(body):
+        from nodes.reviewer_feedback import record_many
+        record_many(run, holder["review"], [disc_id], request.user["display_name"])
     audit("finding.review", "finding", disc_id, project["id"],
           f"Rev {run['seq']} {disc_id}: " + ", ".join(f"{k}={body[k]}" for k in ("status", "severity") if k in body))
     return jsonify({"finding": holder["entry"], "counts": storage.run_counts(holder["results"], holder["review"])})

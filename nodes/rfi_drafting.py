@@ -562,7 +562,7 @@ def rfi_drafting_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     # Findings an independent check judged not to be real conflicts are kept for the engineer to
     # confirm, but are not turned into RFIs automatically (the engineer can still draft one by hand).
     discrepancies = [d for d in all_found if not d.get("disputed") and not d.get("needs_confirmation")
-                     and not d.get("low_confidence")]
+                     and not d.get("low_confidence") and not d.get("previously_dismissed")]
     if len(discrepancies) < len(all_found):
         print(f"[rfi_drafting] {len(all_found) - len(discrepancies)} finding(s) left out of the RFIs "
               f"(doubted by the second check, or resting on a value to be confirmed)")

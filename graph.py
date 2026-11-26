@@ -40,6 +40,7 @@ from nodes.rfi_drafting import rfi_drafting_agent
 from nodes.export import export_discrepancy_register
 from nodes.run_paths import scan_dirs
 from nodes.checkpoint import checkpointed
+from nodes.reviewer_feedback import with_feedback
 
 from edges import route_input_valid, route_inputs_sufficient, route_discrepancies
 
@@ -51,7 +52,8 @@ def create_conflict_scan_graph() -> StateGraph:
     workflow.add_node("receive_input", receive_input)
     # The two long stages resume from a checkpoint when the same scan is restarted.
     workflow.add_node("analyze_documents", checkpointed("analyze_documents", analyze_documents))
-    workflow.add_node("conflict_scan", checkpointed("conflict_scan", conflict_scan_agent))
+    # Past reviewer decisions are applied on top of the (checkpointed) findings, so new decisions count on a re-run.
+    workflow.add_node("conflict_scan", with_feedback(checkpointed("conflict_scan", conflict_scan_agent)))
     workflow.add_node("draft_rfi", rfi_drafting_agent)
     workflow.add_node("export", export_discrepancy_register)
 

@@ -126,3 +126,44 @@ def test_assessment_lists_unread_drawing_tiles():
     text = " ".join(a["limitations"])
     assert "About 5% of the drawing area" in text and "About 22% of the drawing area" in text
     assert "tile" not in text.lower()                                  # said in terms of the drawings
+
+
+def test_cancel_stops_a_model_call_that_is_still_running(fake_server):
+    """'Cancel scan' waited for a call stuck behind a busy model server (seen 26 Nov): it must stop mid-call."""
+    import threading
+    import pytest
+    started, cancelled = threading.Event(), {"v": False}
+    real_post = client._post
+
+    def slow_post(server, payload, timeout=900):
+        started.set()
+        time.sleep(30)                                   # a long prompt / a queued request
+        return {"content": "{}", "prompt_tokens": 1, "output_tokens": 1}
+
+    client._post = slow_post
+    token = client.cancel_check.set(lambda: cancelled["v"])
+    try:
+        threading.Timer(0.5, lambda: cancelled.update(v=True)).start()
+        t0 = time.time()
+        with pytest.raises(client.ScanCancelled), profile.use("workstation"):
+            client.call("extractor", "sys", f"long prompt {time.time()}", cache=False)
+        assert started.is_set() and time.time() - t0 < 4    # stopped within the poll interval, not after 30 s
+    finally:
+        client.cancel_check.reset(token)
+        client._post = real_post
+
+
+def test_a_cancelled_parallel_stage_does_not_start_queued_work():
+    from fleet import client as fc
+    ran = []
+
+    def task(i):
+        if i == 0:
+            raise fc.ScanCancelled("Cancelled by the user.")
+        time.sleep(0.2)
+        ran.append(i)
+
+    import pytest
+    with pytest.raises(fc.ScanCancelled):
+        fc.pmap(task, range(40), workers=2)
+    assert len(ran) < 10                                 # the queued tasks were dropped

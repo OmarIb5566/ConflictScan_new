@@ -196,6 +196,19 @@ def register(app):
                                   before=a.get("before") or None, limit=int(a.get("limit", 200)))
         return jsonify(rows)
 
+    @app.route("/api/admin/learning", methods=["GET", "DELETE"])
+    @admin_required
+    def admin_learning():
+        """What scans have learned from reviewers' Accept / Dismiss / severity decisions; DELETE forgets it all."""
+        from nodes import reviewer_feedback
+        if request.method == "DELETE":
+            from sqlalchemy import delete
+            with storage.tx() as conn:
+                n = conn.execute(delete(db.review_feedback)).rowcount
+            audit("learning.reset", "system", None, None, f"{n} reviewer decision(s) forgotten")
+            return jsonify({"removed": n})
+        return jsonify(reviewer_feedback.summary())
+
     @app.route("/api/admin/settings")
     @admin_required
     def admin_settings():

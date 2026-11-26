@@ -205,6 +205,9 @@ def _options(temperature: float, extra: Optional[Dict[str, Any]]) -> Dict[str, A
     return ollama_options(temperature, **(extra or {}))
 
 
+_open_responses: Dict[int, Any] = {}      # thread id -> the streamed response it is reading
+
+
 def _post(server: Dict[str, Any], payload: Dict[str, Any], timeout: float = 900) -> Dict[str, Any]:
     http = _http()
     if server.get("kind") == "openai":
@@ -234,7 +237,11 @@ def _post(server: Dict[str, Any], payload: Dict[str, Any], timeout: float = 900)
             body = {k: v for k, v in body.items() if k != "think"}
             r = http.post(server["url"] + "/api/chat", json=body, timeout=timeout, stream=True)
     r.raise_for_status()
-    return _read_stream(r)
+    _open_responses[threading.get_ident()] = r
+    try:
+        return _read_stream(r)
+    finally:
+        _open_responses.pop(threading.get_ident(), None)
 
 
 LOOP_WINDOW = 1200      # chars: a reply whose last LOOP_WINDOW chars already appeared twice is looping
@@ -277,6 +284,59 @@ def _read_stream(r) -> Dict[str, Any]:
     return {"content": "".join(parts), "prompt_tokens": last.get("prompt_eval_count"),
             "output_tokens": last.get("eval_count") or (size // 4 if looped else None),
             "truncated": looped or last.get("done_reason") == "length", "looped": looped}
+
+
+CANCEL_POLL_SECONDS = 1.0
+
+
+def _post_cancellable(server: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    _post on a helper thread while this one watches for a cancel. A single call
+    can run for minutes (a long prompt, a busy model server); checking only
+    between calls left 'Cancel scan' waiting for it. On cancel the stream is
+    closed - which also stops generation on the server - and ScanCancelled is
+    raised at once.
+    """
+    check = cancel_check.get()
+    if check is None:
+        return _post(server, payload)
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def work():
+        box["thread"] = threading.get_ident()
+        try:
+            box["out"] = _post(server, payload)
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller
+            box["err"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=work, daemon=True, name="fleet-request").start()
+    while not done.wait(CANCEL_POLL_SECONDS):
+        if check():
+            r = _open_responses.pop(box.get("thread"), None)
+            if r is not None:
+                try:
+                    r.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise ScanCancelled("Cancelled by the user.")
+    if "err" in box:
+        raise box["err"]
+    return box["out"]
+
+
+def _cancellable_sleep(seconds: float) -> None:
+    end = time.time() + seconds
+    while time.time() < end:
+        _check_cancelled()
+        time.sleep(min(CANCEL_POLL_SECONDS, max(0.0, end - time.time())))
+
+
+def _acquire(sem: threading.BoundedSemaphore) -> None:
+    while not sem.acquire(timeout=CANCEL_POLL_SECONDS):
+        _check_cancelled()
 
 
 def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = None, temperature: float = 0.1,
@@ -325,12 +385,16 @@ def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = No
         for attempt in range(max_retries + 1):
             _check_cancelled()
             if attempt:
-                time.sleep(min(20, 4 * attempt))
+                _cancellable_sleep(min(20, 4 * attempt))
             started = time.time()
             try:
-                with _sem(role, server):
+                sem = _sem(role, server)
+                _acquire(sem)
+                try:
                     started = time.time()
-                    out = _post(server, payload)
+                    out = _post_cancellable(server, payload)
+                finally:
+                    sem.release()
                 content = out["content"]
                 if not content.strip():
                     raise ValueError("empty reply")
@@ -342,6 +406,8 @@ def call(role: str, system: str, user: str, images: Optional[Sequence[str]] = No
                 if key and not truncated:          # a cut-off reply is never replayed from the cache
                     _cache_put(key, role, model_name, content)
                 return content
+            except ScanCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 _log_call(role, model_name, server, (time.time() - started) * 1000, images=len(images), ok=False,
@@ -488,4 +554,9 @@ def pmap(fn: Callable[[Any], Any], items: Iterable[Any], role: Optional[str] = N
         return [fn(it) for it in items]
     with ThreadPoolExecutor(max_workers=n, thread_name_prefix=f"fleet-{role or 'x'}") as ex:
         futures = [ex.submit(contextvars.copy_context().run, fn, it) for it in items]
-        return [f.result() for f in futures]
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            for f in futures:          # e.g. the scan was cancelled: do not start what is still queued
+                f.cancel()
+            raise

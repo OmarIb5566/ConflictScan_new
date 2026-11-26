@@ -37,6 +37,7 @@ parallel = 1
 verify_findings = false
 semantic_matching = false
 rfi_memory = false
+learn_from_reviews = false   # benchmarks stay reproducible
 second_reader = false
 vote_critical = false
 
@@ -62,6 +63,7 @@ parallel = 4
 verify_findings = true
 semantic_matching = true
 rfi_memory = true
+learn_from_reviews = true    # findings like ones reviewers dismissed / re-rated are adjusted
 second_reader = false        # doubles drawing time on one GPU; on in the a100 profile
 vote_critical = false
 
@@ -86,6 +88,7 @@ parallel = 4
 verify_findings = true
 semantic_matching = true
 rfi_memory = true
+learn_from_reviews = true    # findings like ones reviewers dismissed / re-rated are adjusted
 second_reader = true
 vote_critical = true         # 3-way vote on critical findings
 

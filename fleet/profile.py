@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 import config
 
-FEATURES = ("verify_findings", "semantic_matching", "rfi_memory", "second_reader", "vote_critical")
+FEATURES = ("verify_findings", "semantic_matching", "rfi_memory", "second_reader", "vote_critical", "learn_from_reviews")
 VISION_ROLES = ("page_triage", "ocr", "drawing_overview", "drawing_reader", "drawing_second")
 _override: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("fleet_profile", default=None)
 _cache: Dict[str, Any] = {}

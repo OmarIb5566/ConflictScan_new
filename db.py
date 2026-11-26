@@ -430,9 +430,34 @@ upload_sessions = Table(
     Column("created_at", UTCDateTime, nullable=False),
 )
 
+review_feedback = Table(
+    # A reviewer's decision on a finding, stored with the finding as the model produced it - the
+    # pairs later scans learn from (nodes/reviewer_feedback.py). One row per distinct finding per project.
+    "review_feedback", metadata,
+    ID(name="id", primary_key=True),
+    Column("project_id", String(32), nullable=False),
+    Column("run_id", String(32), nullable=False),
+    Column("finding_id", Unicode(64), nullable=False),
+    Column("signature", String(64), nullable=False),        # hash of the finding text below
+    Column("decision", String(20), nullable=False),         # accepted | dismissed | rerated
+    Column("model_severity", String(20)),                   # as the model found it
+    Column("final_severity", String(20)),                   # after the reviewer (None when dismissed)
+    Column("issue_class", String(60)),
+    Column("finding", JSONText),                            # the model's finding (topic, description, quotes...)
+    Column("text", UnicodeText, nullable=False, default=""),  # what is embedded and compared
+    Column("note", UnicodeText),
+    Column("decided_by", Unicode(200)),
+    Column("embedding", JSONText),
+    Column("embed_model", Unicode(120)),
+    Column("created_at", UTCDateTime, nullable=False),
+    Column("updated_at", UTCDateTime, nullable=False),
+    UniqueConstraint("project_id", "signature", name="uq_review_feedback_finding"),
+    Index("ix_review_feedback_run", "run_id", "finding_id"),
+)
+
 ALL_TABLES = [users, user_prefs, projects, project_members, runs, run_files, jobs, audit_log,
               login_attempts, presence, ai_cache, model_calls, rfi_memory, app_settings, rfi_log, rfi_log_files,
-              comments, notifications, upload_sessions]
+              comments, notifications, upload_sessions, review_feedback]
 
 
 # ---------------------------------------------------------------------------

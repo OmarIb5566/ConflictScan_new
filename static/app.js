@@ -23,6 +23,18 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+// What earlier reviews taught the scan about this finding (nodes/reviewer_feedback.py).
+const learnedBadge = (d) => {
+  const l = d.learned || {};
+  if (d.previously_dismissed) {
+    const why = l.reason ? ` Last reason given: "${l.reason}".` : "";
+    return `<span class="badge outline learned" title="Reviewers dismissed ${Number(l.dismissed_before) || "several"} similar finding(s) on earlier scans.${esc(why)} It was set to minor and left out of the drafted RFIs. Accept it if it applies here.">dismissed before</span>`;
+  }
+  if (l.rated_before) {
+    return `<span class="badge outline learned" title="Reviewers rated ${Number(l.votes)} of ${Number(l.of)} similar findings ${esc(l.rated_before)}. Found as ${esc(d.severity_found || "-")}.">severity from past reviews</span>`;
+  }
+  return "";
+};
 const isTyping = (e) => { const t = e.target; return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)); };
 const local = {
   get(k, d) { try { const v = localStorage.getItem("cs." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -2682,6 +2694,7 @@ class RunView {
           ${rv.carried_from ? `<span class="badge outline" title="Your triage from ${esc(rv.carried_from)} was carried over${rv.reopened ? " - reopened: " + esc(rv.reopened) : ""}">&#8617; ${esc(rv.carried_from)}</span>` : ""}
           ${d.disputed ? `<span class="badge disputed" title="${esc((d.verification || {}).reason || "An independent check judged this not to be a real conflict")}">independent check: not a conflict</span>`
             : d.verification && d.verification.verdict === "confirmed" ? `<span class="badge checked" title="Confirmed by an independent check">&#10003; double-checked</span>` : ""}
+          ${learnedBadge(d)}
           ${status !== "open" ? `<span class="badge ${status === "accepted" ? "ok" : "outline"}">${esc(status)}</span>` : ""}
           ${rv.note ? `<span class="badge outline" title="${esc(rv.note)}">note</span>` : ""}
           ${this.commentCounts[`finding:${d.id}`] ? `<span class="badge outline" title="Comments">&#128172; ${this.commentCounts[`finding:${d.id}`]}</span>` : ""}
@@ -2704,7 +2717,7 @@ class RunView {
             ${[["open", "Open"], ["accepted", "Accept"], ["dismissed", "Dismiss"]].map(([v, l]) => `<button data-v="${v}" class="${status === v ? "on" : ""}">${l}</button>`).join("")}
           </div>
           <select data-sev="${esc(d.id)}" aria-label="Severity">
-            <option value="">Severity: ${esc(d.severity || "minor")} (as found)</option>
+            <option value="">Severity: ${esc(d.severity || "minor")} ${d.severity_found ? `(found as ${esc(d.severity_found)}, adjusted from past reviews)` : "(as found)"}</option>
             ${SEVERITIES.map((s) => `<option value="${s}" ${rv.severity === s ? "selected" : ""}>Change to ${s}</option>`).join("")}
           </select>
           ${rfis.length ? `<button class="btn sm" data-goto-rfi="${esc(rfis[0])}">Open ${esc(rfis[0])} &rarr;</button>`

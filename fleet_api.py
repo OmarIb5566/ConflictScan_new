@@ -66,9 +66,15 @@ def register(app):
             mem = memory.count()
         except Exception:  # noqa: BLE001
             mem = {}
+        try:
+            from nodes.reviewer_feedback import summary as learning_summary
+            learning = learning_summary()
+        except Exception:  # noqa: BLE001
+            learning = {}
         return jsonify({"profile": prof["name"], "mode": prof["mode"], "profiles": profile.profile_names(),
                         "features": {f: prof.get(f) for f in profile.FEATURES}, "roles": roles,
-                        "servers": servers, "usage_24h": usage, "rfi_memory": mem, "console": console})
+                        "servers": servers, "usage_24h": usage, "rfi_memory": mem, "learning": learning,
+                        "console": console})
 
     @app.route("/api/admin/fleet/test", methods=["POST"])
     @admin_required

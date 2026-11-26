@@ -682,6 +682,9 @@ def register(app):
             return {"review": review}
 
         mutate_run(run_id, change, request.user["id"])
+        if {"status", "severity"} & set(body):
+            from nodes.reviewer_feedback import record_many
+            record_many(run, holder["review"], ids, request.user["display_name"])
         if assignee:
             notify([assignee], "assigned", f"{len(ids)} finding(s) of {project['name']} Rev {run['seq']} assigned to you",
                    ", ".join(ids[:8]), f"#/run/{run_id}/findings", project["id"], exclude=request.user["id"])

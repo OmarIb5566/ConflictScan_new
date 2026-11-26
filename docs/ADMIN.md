@@ -89,6 +89,32 @@ past RFIs and client replies to the company memory, which the drafter uses
 for house style. Issued and answered RFIs, and imported RFI logs, are added
 automatically.
 
+**Learning from reviewers.** When an engineer accepts or dismisses a finding,
+or changes its severity, the decision is saved together with the finding as
+the model produced it. Every later scan, in any project, compares its findings
+with those decisions by meaning:
+
+- **Dismissed before:** at least 2 findings of the same type that say the same
+  thing were dismissed, and at least twice as many were dismissed as kept. The
+  new finding is set to minor, labelled *dismissed before* (the last reason
+  given is shown), and left out of the drafted RFIs. It stays in the register,
+  and accepting it keeps it.
+- **Severity from past reviews:** at least 2 such findings were kept, and at
+  least two-thirds of them ended at another severity. The new finding takes
+  that severity, and the severity as found is shown. A point to confirm stays
+  minor; a finding on doubtful evidence is never raised to critical.
+
+The AI fleet page shows how many decisions have been learned from. **Forget**
+clears them. The switch is `learn_from_reviews` in `config/fleet.toml`: on in
+`workstation` and `a100`, off in `baseline` so benchmarks are repeatable. Two
+settings tune it, as environment variables:
+
+- `CONFLICTSCAN_LEARN_SIMILARITY`: how alike findings must be (default 0.85);
+- `CONFLICTSCAN_LEARN_MIN_VOTES`: how many decisions are needed (default 2).
+
+No model is retrained. The decisions only adjust the grading, which costs a few
+seconds per scan.
+
 ## System health
 
 Admin console → **System health** shows:

@@ -145,14 +145,19 @@ class AdminView {
     const installed = [...new Set(f.servers.flatMap((s) => s.models || []))].sort();
     const usage = Object.fromEntries(f.usage_24h.map((u) => [u.role, u]));
     const feat = { verify_findings: "Second opinion on findings", semantic_matching: "Meaning-based matching",
-      rfi_memory: "Company RFI memory", second_reader: "Second reading of drawing values", vote_critical: "3-way vote on critical findings" };
+      rfi_memory: "Company RFI memory", second_reader: "Second reading of drawing values", vote_critical: "3-way vote on critical findings",
+      learn_from_reviews: "Learn from reviewers' decisions" };
+    const learned = (f.learning || {}).decisions || {};
     return `<div class="card"><div class="row wrap" style="gap:14px">
         <label class="field" style="margin:0"><span>Active profile</span>
           <select data-fleet-profile>${f.profiles.map((p) => `<option value="${esc(p)}" ${p === f.profile ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
         <div class="grow hint">Mode: <strong>${esc(f.mode)}</strong> ${f.mode === "resident" ? "- every model stays loaded, roles run side by side"
           : "- one GPU: models take turns, work is ordered by model"}.<br>
           ${Object.entries(f.features).map(([k, on]) => `<span class="badge ${on ? "user-active" : "outline"}">${on ? "&#10003;" : "&ndash;"} ${esc(feat[k] || k)}</span>`).join(" ")}</div>
-        <div class="hint">RFI memory: <strong>${Object.values(f.rfi_memory || {}).reduce((a, b) => a + b, 0)}</strong> past RFIs</div></div>
+        <div class="hint">RFI memory: <strong>${Object.values(f.rfi_memory || {}).reduce((a, b) => a + b, 0)}</strong> past RFIs<br>
+          Reviewer decisions learned from: <strong>${Object.values(learned).reduce((a, b) => a + b, 0)}</strong>
+          <span class="muted">(${Number(learned.dismissed || 0)} dismissed, ${Number(learned.accepted || 0)} accepted, ${Number(learned.rerated || 0)} re-rated)</span>
+          ${Object.values(learned).some(Boolean) ? `<button class="btn sm" data-learning-reset>Forget</button>` : ""}</div></div>
         <p class="hint" style="margin-top:10px">Changes apply to the next scan. Only models installed on the company's own model servers can be chosen; cloud models are refused.</p></div>
       <datalist id="installed-models">${installed.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
       <div class="table-wrap"><table class="list"><thead><tr><th>Job</th><th>Configured</th><th>Running on</th><th>Override</th><th>Last 24 h</th><th></th></tr></thead>
@@ -250,6 +255,12 @@ class AdminView {
       out.innerHTML = '<span class="spinner sm"></span>';
       const r = await api("/api/admin/fleet/test", { method: "POST", body: { role: test.dataset.fleetTest } }).catch((err) => ({ ok: false, error: err.message }));
       out.innerHTML = r.ok ? `<span style="color:var(--ok)">&#10003; ${(r.ms / 1000).toFixed(1)} s</span>` : `<span style="color:var(--danger)" title="${esc(r.error || "")}">failed</span>`;
+      return;
+    }
+    if (t.closest("[data-learning-reset]")) {
+      if (!(await confirmDialog("Forget every reviewer decision the scans have learned from? New scans will grade findings as the model finds them until reviewers decide again.", { title: "Forget learned decisions", confirmLabel: "Forget", danger: true }))) return;
+      try { const r = await api("/api/admin/learning", { method: "DELETE" }); toast(`${r.removed} decision(s) forgotten`, { type: "success" }); this.renderBody(true); }
+      catch (err) { toastError(err); }
       return;
     }
     const job = t.closest("[data-job]");
